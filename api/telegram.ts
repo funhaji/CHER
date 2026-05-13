@@ -4,6 +4,11 @@ import { ensureSchema } from "../lib/db.js";
 import { tg } from "../lib/telegram.js";
 import { logError } from "../lib/log.js";
 
+/** Cold-start `ensureSchema()` can exceed the default 10s on large migrations (use Pro for >60s). */
+export const config = {
+  maxDuration: 60
+};
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") {
     res.status(405).json({ ok: false, error: "Method not allowed" });
