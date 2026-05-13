@@ -48,7 +48,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const panelRows = await sql`
-      SELECT id, panel_type, base_url, username, password, subscription_public_port
+      SELECT id, panel_type, base_url, username, password, subscription_public_port, subscription_public_host, subscription_link_protocol, config_public_host
       FROM panels
       WHERE id = ${panelId}
       LIMIT 1;
@@ -158,13 +158,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           result = { ok: true, message: "لینک‌ها با موفقیت تغییر یافتند" };
         }
       } else if (panelType === "sanaei") {
-        const { regenerateSanaeiClientLink, buildSanaeiConfigLinks, buildSanaeiSubscriptionUrl, parseJsonObject } = await import("../lib/bot.js");
+        const { regenerateSanaeiClientLink, buildSanaeiConfigLinks, buildSanaeiSubscriptionUrl, mergeSanaeiPanelRowIntoClientConfig, parseJsonObject } = await import("../lib/bot.js");
         const regenRes = await regenerateSanaeiClientLink(panel, clientKey);
         if (!regenRes.ok) {
           result = { ok: false, message: regenRes.message };
         } else {
           const panelConfig = (typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : (row.panel_config as Record<string, unknown>)) || {};
-          const newConfigLinks = buildSanaeiConfigLinks(String(panel.base_url), regenRes.inbound as Record<string, unknown>, regenRes.client as Record<string, unknown>, panelConfig);
+          const mergedCfg = mergeSanaeiPanelRowIntoClientConfig(panelConfig, panel as Record<string, unknown>);
+          const newConfigLinks = buildSanaeiConfigLinks(String(panel.base_url), regenRes.inbound as Record<string, unknown>, regenRes.client as Record<string, unknown>, mergedCfg);
           const subId = String((regenRes.client as any).subId || "");
           const newSubscriptionUrl = subId ? buildSanaeiSubscriptionUrl(String(panel.base_url), panelConfig, subId, panel) : undefined;
           
