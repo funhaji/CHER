@@ -2,8 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { fulfillOrderByPaymentId } from "../lib/bot.js";
 import { logError, logInfo } from "../lib/log.js";
 import { verifyTetrapayOrder } from "../lib/tetrapay.js";
-import { getSetting } from "../lib/settings.js";
-import { adminIds } from "../lib/env.js";
+import { getSetting, getAdminIds } from "../lib/settings.js";
 import { tg } from "../lib/telegram.js";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -32,7 +31,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     } catch (statusErr) {
       logError("tetrapay_callback_verify_failed", statusErr, { authority });
-      for (const adminId of adminIds) {
+      for (const adminId of await getAdminIds()) {
         await tg("sendMessage", {
           chat_id: adminId,
           text: `⚠️ خطا در تایید پرداخت TetraPay\nauthority: ${authority}\nعلت: ${(statusErr as Error).message || String(statusErr)}`

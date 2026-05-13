@@ -4,13 +4,6 @@ const schema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   DATABASE_URL: z.string().optional(),
   POSTGRES_URL: z.string().optional(),
-  /** auto: Neon host → @neondatabase/serverless; otherwise TCP postgres (Supabase, local, …). */
-  DATABASE_DRIVER: z.enum(["auto", "neon", "postgres"]).default("auto"),
-  /**
-   * Postgres schema for bot tables. Default on Supabase hosts: `telegram_seller` (avoids clashes with `public.products`, etc.).
-   * Set to `public` to force the default schema (not recommended on Supabase if `public.products` already exists).
-   */
-  DATABASE_SCHEMA: z.string().optional(),
   ADMIN_IDS: z.string().default(""),
   PUBLIC_BASE_URL: z.string().url().optional(),
   TRONADO_API_KEY: z.string().optional(),
@@ -40,4 +33,3 @@ if (!db) {
   throw new Error("DATABASE_URL or POSTGRES_URL is required");
 }
 export const databaseUrl: string = db;
-export const databaseDriver: "auto" | "neon" | "postgres" = env.DATABASE_DRIVER;

@@ -1,8 +1,8 @@
 import { ensureSchema, resetBusinessDataPreserveCaches, sql } from "./db.js";
-import { adminIds, env } from "./env.js";
+import { env } from "./env.js";
 import { logError, logInfo } from "./log.js";
 import { getOrderToken, getStatusByPaymentId, getTronPriceToman } from "./tronado.js";
-import { getBoolSetting, getNumberSetting, getPublicBaseUrl, getSetting, setSetting } from "./settings.js";
+import { getAdminIds, getBoolSetting, getNumberSetting, getPublicBaseUrl, getSetting, setSetting } from "./settings.js";
 import { getUsdtRateTomanCached } from "./rates.js";
 import { getCryptoTomanPerUnitCached } from "./crypto-rates.js";
 import { escapeHtml, tg } from "./telegram.js";
@@ -104,8 +104,9 @@ type ReferralSettingsSnapshot = {
 
 let botUsernameCache: string | null | undefined;
 
-function isAdmin(userId: number) {
-  return adminIds.includes(userId);
+async function isAdmin(userId: number) {
+  const ids = await getAdminIds();
+  return ids.includes(userId);
 }
 
 function randomCode(length = 8) {
@@ -752,7 +753,7 @@ async function maybeGrantReferralRewardsV2(inviterId: number) {
             `🛠 جایزه دعوت در انتظار اقدام ادمین است\nکاربر: ${inviterId}\nمرحله: ${batch}\nسفارش: ${String(orderRows[0].purchase_id || "-")}`,
             { inline_keyboard: [[{ text: "ارسال کانفیگ جایزه", callback_data: `admin_provide_config_${rewardOrderId}` }]] }
           );
-          if (adminIds.length === 0) {
+          if ((await getAdminIds()).length === 0) {
             await tg("sendMessage", {
               chat_id: inviterId,
               text:
@@ -894,7 +895,7 @@ async function maybeGrantReferralRewardsV2(inviterId: number) {
             inline_keyboard: [[{ text: "ارسال کانفیگ جایزه", callback_data: `admin_provide_config_${granted.orderId}` }]]
           }
         );
-        if (adminIds.length === 0) {
+        if ((await getAdminIds()).length === 0) {
           await tg("sendMessage", {
             chat_id: inviterId,
             text:
@@ -2584,13 +2585,13 @@ async function showPanelDetails(chatId: number, panelId: number, notice?: string
   });
 }
 
-function mainMenuMarkup(userId: number) {
+async function mainMenuMarkup(userId: number) {
   const rows = [
     [cb("🛍 خرید کانفیگ", "buy_menu", "primary"), cb("📦 سفارش‌ها و کانفیگ‌ها", "my_configs", "primary")],
     [cb("👛 کیف پول", "wallet_menu", "success"), cb("🎁 دعوت دوستان", "referral_menu", "success")],
     [cb("🆘 پشتیبانی", "support", "primary")]
   ];
-  if (isAdmin(userId)) {
+  if (await isAdmin(userId)) {
     rows.push([cb("🛠 پنل ادمین", "admin_panel", "primary")]);
   }
   return { inline_keyboard: rows };
@@ -2618,7 +2619,7 @@ async function sendMainMenu(chatId: number, userId: number, text?: string) {
       text ||
       "🏠 منوی اصلی\n\n" +
         "از گزینه‌های زیر می‌توانید خرید، پیگیری سفارش، مدیریت کیف پول و دعوت دوستان را انجام دهید.",
-    reply_markup: mainMenuMarkup(userId)
+    reply_markup: await mainMenuMarkup(userId)
   });
 }
 
@@ -5338,9 +5339,8 @@ async function parseAndApplyState(
       `مقدار: ${rows[0].crypto_amount || "-"}\n` +
       `آدرس: ${shortAddr(String(rows[0].crypto_address || ""))}`;
 
-    for (const adminId of adminIds) {
+    for (const adminId of await getAdminIds()) {
       await tg("sendPhoto", {
-        chat_id: adminId,
         photo: photoFileId,
         caption,
         reply_markup: {
@@ -5394,7 +5394,7 @@ async function parseAndApplyState(
         ? `\nشبکه: ${String(rows[0].crypto_network || "-")}\nمقدار: ${String(rows[0].crypto_amount || "-")}\nآدرس: ${shortAddr(String(rows[0].crypto_address || ""))}`
         : "";
     await clearState(userId);
-    for (const adminId of adminIds) {
+    for (const adminId of await getAdminIds()) {
       try {
         await tg("sendPhoto", {
           chat_id: adminId,
@@ -5525,7 +5525,7 @@ async function parseAndApplyState(
       (extraLines.length ? `\n${extraLines.join("\n")}` : "");
 
     await clearState(userId);
-    for (const adminId of adminIds) {
+    for (const adminId of await getAdminIds()) {
       try {
         await tg("sendPhoto", {
           chat_id: adminId,
@@ -5593,7 +5593,7 @@ async function parseAndApplyState(
     const cardDeliveryLabel = formatDeliveryModeLabel(cardDeliveryMode);
     const cardProductSnap = String(rows[0].product_name_snapshot || "").trim();
     await clearState(userId);
-    for (const adminId of adminIds) {
+    for (const adminId of await getAdminIds()) {
       try {
         await tg("sendPhoto", {
           chat_id: adminId,
@@ -5663,7 +5663,7 @@ async function parseAndApplyState(
     const topupProductName = String(cfgRows[0]?.product_name || "").trim();
     const topupDeliveryLabel = formatDeliveryModeLabel(parseDeliveryMode(String(cfgRows[0]?.panel_delivery_mode || "")));
     await clearState(userId);
-    for (const adminId of adminIds) {
+    for (const adminId of await getAdminIds()) {
       try {
         await tg("sendPhoto", {
           chat_id: adminId,
@@ -10401,7 +10401,8 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
 }
 
 async function notifyAdmins(text: string, replyMarkup?: Record<string, unknown>) {
-  for (const adminId of adminIds) {
+  const ids = await getAdminIds();
+  for (const adminId of ids) {
     try {
       await tg("sendMessage", { chat_id: adminId, text, reply_markup: replyMarkup });
     } catch (error) {
@@ -10578,7 +10579,7 @@ export async function fulfillOrderByPaymentId(paymentId: string) {
         chat_id: Number(topup.telegram_id),
         text: `✅ پرداخت شما با موفقیت انجام شد و مبلغ ${formatPriceToman(Number(topup.amount))} تومان به کیف پول شما اضافه شد.`
       });
-      for (const adminId of adminIds) {
+      for (const adminId of await getAdminIds()) {
         await tg("sendMessage", {
           chat_id: adminId,
           text: `💰 کاربر ${topup.telegram_id} مبلغ ${formatPriceToman(Number(topup.amount))} تومان از طریق ${paymentLabel} کیف پول خود را شارژ کرد.`
@@ -14715,7 +14716,7 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
 }
 
 async function checkMandatoryChannels(userId: number, chatId: number, silent = false): Promise<boolean> {
-  if (isAdmin(userId)) return true;
+  if (await isAdmin(userId)) return true;
 
   const channelsRaw = await getSetting("mandatory_channels");
   if (!channelsRaw) return true;
@@ -14802,12 +14803,12 @@ async function handleMessage(update: TgUpdate["message"]) {
     await sendMainMenu(chatId, userId);
     return;
   }
-  if (text === "/admin" && isAdmin(userId)) {
+  if (text === "/admin" && await isAdmin(userId)) {
     await sendAdminPanel(chatId);
     return;
   }
   if (text === "/help") {
-    if (isAdmin(userId)) {
+    if (await isAdmin(userId)) {
       await adminHelp(chatId);
     } else {
       const support = ((await getSetting("support_username")) || "").trim();

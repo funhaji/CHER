@@ -1,9 +1,8 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { ensureSchema, sql } from "../lib/db.js";
-import { adminIds } from "../lib/env.js";
 import { fulfillOrderByPaymentId } from "../lib/bot.js";
 import { logError, logInfo } from "../lib/log.js";
-import { getSetting } from "../lib/settings.js";
+import { getSetting, getAdminIds } from "../lib/settings.js";
 import { getSwapwalletInvoiceById, getSwapwalletInvoiceByOrderId, isSwapwalletInvoicePaid } from "../lib/swapwallet.js";
 import { tg } from "../lib/telegram.js";
 
@@ -52,7 +51,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     } catch (e) {
       logError("swapwallet_callback_invoice_lookup_failed", e, { orderId, invoiceId });
-      for (const adminId of adminIds) {
+      for (const adminId of await getAdminIds()) {
         await tg("sendMessage", {
           chat_id: adminId,
           text: `⚠️ خطا در بررسی پرداخت SwapWallet\norderId: ${orderId || "-"}\ninvoiceId: ${invoiceId || "-"}\nعلت: ${(e as Error).message || String(e)}`

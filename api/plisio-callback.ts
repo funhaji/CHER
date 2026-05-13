@@ -1,10 +1,9 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { fulfillOrderByPaymentId } from "../lib/bot.js";
 import { logError, logInfo } from "../lib/log.js";
-import { getSetting } from "../lib/settings.js";
+import { getSetting, getAdminIds } from "../lib/settings.js";
 import { getPlisioOperation, verifyPlisioCallbackHash } from "../lib/plisio.js";
 import { ensureSchema, sql } from "../lib/db.js";
-import { adminIds } from "../lib/env.js";
 import { tg } from "../lib/telegram.js";
 
 function normalizePaymentIdFromCallback(data: Record<string, unknown>) {
@@ -26,7 +25,7 @@ function isFailureStatus(status: string) {
 }
 
 async function notifyAdmins(text: string, replyMarkup?: Record<string, unknown>) {
-  for (const adminId of adminIds) {
+  for (const adminId of await getAdminIds()) {
     await tg("sendMessage", { chat_id: adminId, text, reply_markup: replyMarkup }).catch(() => {});
   }
 }
