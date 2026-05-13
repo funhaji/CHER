@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>اسکنر کانفیگ‌های مرده</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:          #0a0c10;
+      --bg-panel:    #0f1117;
+      --bg-card:     #141720;
+      --bg-row:      #181c26;
+      --bg-hover:    #1e2330;
+      --border:      #252a38;
+      --border-soft: #1c2030;
+      --primary:     #3b82f6;
+      --primary-glow:#3b82f620;
+      --primary-dim: #2563eb;
+      --accent:      #06b6d4;
+      --text:        #e2e8f0;
+      --text-muted:  #64748b;
+      --text-dim:    #94a3b8;
+      --danger:      #f43f5e;
+      --danger-bg:   #f43f5e18;
+      --success:     #10b981;
+      --success-bg:  #10b98118;
+      --warning:     #f59e0b;
+      --warning-bg:  #f59e0b18;
+      --info:        #6366f1;
+      --info-bg:     #6366f118;
+      --radius:      10px;
+      --radius-lg:   16px;
+      --shadow:      0 4px 24px #00000060;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Vazirmatn', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    /* ─── Layout ────────────────────────────────── */
+    .page { max-width: 960px; margin: 0 auto; }
+
+    /* ─── Topbar ───────────────────────────────── */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 2.5rem;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    .topbar-title {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .topbar-icon {
+      width: 42px; height: 42px;
+      background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .topbar-icon svg { width: 22px; height: 22px; stroke: #fff; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .topbar h1 { font-size: 1.25rem; font-weight: 700; }
+    .topbar p { font-size: 0.8rem; color: var(--text-muted); margin-top: 2px; }
+
+    .topbar-actions { display: flex; gap: 0.6rem; }
+
+    /* ─── Buttons ──────────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.55rem 1.1rem;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      font-family: inherit; font-size: 0.85rem; font-weight: 500;
+      cursor: pointer; transition: all 0.18s; background: var(--bg-card); color: var(--text);
+      white-space: nowrap;
+    }
+    .btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+    .btn:hover { border-color: #3b4560; background: var(--bg-hover); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-primary {
+      background: var(--primary); border-color: var(--primary); color: #fff;
+    }
+    .btn-primary:hover:not(:disabled) { background: var(--primary-dim); border-color: var(--primary-dim); }
+
+    .btn-danger  { background: var(--danger-bg);  border-color: var(--danger);  color: var(--danger); }
+    .btn-danger:hover:not(:disabled)  { background: #f43f5e30; }
+    .btn-success { background: var(--success-bg); border-color: var(--success); color: var(--success); }
+    .btn-success:hover:not(:disabled) { background: #10b98130; }
+    .btn-info    { background: var(--info-bg);    border-color: var(--info);    color: var(--info); }
+    .btn-info:hover:not(:disabled)    { background: #6366f130; }
+    .btn-sm { padding: 0.3rem 0.65rem; font-size: 0.78rem; border-radius: 6px; }
+    .btn-sm svg { width: 13px; height: 13px; }
+
+    /* ─── Stats Strip ──────────────────────────── */
+    .stats-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+    @media (max-width: 600px) { .stats-strip { grid-template-columns: repeat(2, 1fr); } }
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.1rem;
+    }
+    .stat-label { font-size: 0.73rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem; }
+    .stat-value { font-size: 1.6rem; font-weight: 700; line-height: 1; }
+    .stat-value.blue   { color: var(--primary); }
+    .stat-value.red    { color: var(--danger); }
+    .stat-value.green  { color: var(--success); }
+    .stat-value.yellow { color: var(--warning); }
+
+    /* ─── Progress Panel ───────────────────────── */
+    .progress-panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1.25rem;
+      display: none;
+    }
+    .progress-panel.visible { display: block; }
+    .progress-head {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 0.85rem;
+    }
+    .progress-label { font-size: 0.85rem; color: var(--text-dim); }
+    .progress-pct { font-size: 0.85rem; font-weight: 600; color: var(--primary); font-variant-numeric: tabular-nums; }
+    .progress-track {
+      width: 100%; height: 6px;
+      background: var(--bg-row); border-radius: 999px; overflow: hidden;
+      margin-bottom: 0.85rem;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--primary) 0%, var(--accent) 100%);
+      width: 0%; transition: width 0.35s ease; border-radius: 999px;
+    }
+    .progress-fill.done { background: linear-gradient(90deg, var(--success) 0%, #34d399 100%); }
+
+    /* ─── Log Box ──────────────────────────────── */
+    .log-box {
+      background: var(--bg);
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      max-height: 130px;
+      overflow-y: auto;
+      display: none;
+    }
+    .log-box.visible { display: block; }
+    .log-entry {
+      font-size: 0.76rem;
+      color: var(--text-muted);
+      padding: 0.18rem 0;
+      border-bottom: 1px solid #ffffff06;
+      font-variant-numeric: tabular-nums;
+      direction: ltr; text-align: left;
+    }
+    .log-entry:last-child { border-bottom: none; }
+    .log-entry.err { color: var(--danger); }
+    .log-entry.ok  { color: var(--success); }
+
+    /* ─── Filter Bar ───────────────────────────── */
+    .filter-bar {
+      display: flex;
+      gap: 0.6rem;
+      align-items: center;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+    .filter-bar input, .filter-bar select {
+      flex: 1; min-width: 160px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.5rem 0.9rem;
+      color: var(--text); font-family: inherit; font-size: 0.83rem;
+      outline: none; transition: border-color 0.18s;
+    }
+    .filter-bar input:focus, .filter-bar select:focus { border-color: var(--primary); }
+    .filter-bar input::placeholder { color: var(--text-muted); }
+    .filter-bar select option { background: var(--bg-card); }
+
+    /* ─── Results Table ────────────────────────── */
+    .result-panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+    }
+    .result-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 1rem 1.4rem;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap; gap: 0.5rem;
+    }
+    .result-header h2 { font-size: 0.95rem; font-weight: 600; }
+    .result-header .badge {
+      background: var(--primary-glow); color: var(--primary);
+      border: 1px solid #3b82f640;
+      padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+    }
+
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%; border-collapse: collapse;
+      text-align: right; font-size: 0.83rem;
+    }
+    thead tr { background: var(--bg-row); }
+    th {
+      padding: 0.7rem 1rem;
+      font-weight: 500; color: var(--text-muted); font-size: 0.75rem;
+      text-transform: uppercase; letter-spacing: 0.04em;
+      border-bottom: 1px solid var(--border); white-space: nowrap;
+    }
+    td {
+      padding: 0.65rem 1rem;
+      border-bottom: 1px solid var(--border-soft);
+      vertical-align: middle;
+    }
+    tbody tr { transition: background 0.12s; }
+    tbody tr:hover { background: var(--bg-hover); }
+    tbody tr:last-child td { border-bottom: none; }
+    td.ltr { direction: ltr; text-align: left; font-size: 0.78rem; color: var(--text-dim); font-family: 'Courier New', monospace; }
+    td.center { text-align: center; }
+
+    .tag {
+      display: inline-flex; align-items: center; gap: 0.25rem;
+      padding: 0.2rem 0.55rem; border-radius: 5px; font-size: 0.72rem; font-weight: 600;
+      white-space: nowrap;
+    }
+    .tag-danger  { background: var(--danger-bg);  color: var(--danger); }
+    .tag-success { background: var(--success-bg); color: var(--success); }
+    .tag-warning { background: var(--warning-bg); color: var(--warning); }
+    .tag-muted   { background: #ffffff0a;          color: var(--text-muted); }
+
+    .action-cell { display: flex; gap: 0.35rem; justify-content: flex-end; flex-wrap: wrap; }
+
+    .empty-state {
+      text-align: center; padding: 3rem 1rem;
+      color: var(--text-muted); font-size: 0.875rem;
+    }
+    .empty-state svg { width: 40px; height: 40px; margin: 0 auto 0.75rem; display: block; opacity: 0.3; }
+
+    /* ─── Toast ────────────────────────────────── */
+    #toast-container {
+      position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
+      display: flex; flex-direction: column; align-items: center; gap: 0.5rem;
+      z-index: 9999; pointer-events: none;
+    }
+    .toast {
+      padding: 0.65rem 1.25rem; border-radius: var(--radius);
+      font-size: 0.83rem; font-weight: 500;
+      border: 1px solid; backdrop-filter: blur(8px);
+      animation: toastIn 0.25s ease, toastOut 0.3s ease 2.5s forwards;
+      pointer-events: auto;
+    }
+    .toast-success { background: #0f2c22; border-color: var(--success); color: var(--success); }
+    .toast-error   { background: #2c0f17; border-color: var(--danger);  color: var(--danger); }
+    .toast-info    { background: #0f1c3c; border-color: var(--primary); color: var(--primary); }
+    @keyframes toastIn  { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+    @keyframes toastOut { from { opacity: 1; } to { opacity: 0; pointer-events: none; } }
+
+    /* ─── Modal ────────────────────────────────── */
+    .modal-overlay {
+      display: none;
+      position: fixed; inset: 0; z-index: 8888;
+      background: rgba(0,0,0,0.7); backdrop-filter: blur(4px);
+      align-items: center; justify-content: center; padding: 1rem;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 1.75rem 1.75rem 1.5rem;
+      width: 100%; max-width: 420px;
+      box-shadow: var(--shadow);
+      animation: modalIn 0.2s ease;
+    }
+    @keyframes modalIn { from { opacity: 0; transform: scale(0.95) translateY(-8px); } to { opacity: 1; transform: none; } }
+    .modal h3 { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.4rem; }
+    .modal p  { font-size: 0.83rem; color: var(--text-muted); margin-bottom: 1.25rem; line-height: 1.6; }
+    .modal-input {
+      width: 100%;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 0.6rem 0.9rem;
+      color: var(--text); font-family: inherit; font-size: 0.9rem;
+      outline: none; margin-bottom: 1.25rem; transition: border-color 0.18s;
+      direction: ltr;
+    }
+    .modal-input:focus { border-color: var(--primary); }
+    .modal-actions { display: flex; gap: 0.6rem; justify-content: flex-end; }
+
+    /* ─── Scrollbar ────────────────────────────── */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2a3045; border-radius: 999px; }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Top Bar -->
+  <div class="topbar">
+    <div class="topbar-title">
+      <div class="topbar-icon">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </div>
+      <div>
+        <h1>اسکنر کانفیگ‌های مرده</h1>
+        <p>جستجو در پنل‌های Marzban و Sanaei برای یافتن کانفیگ‌های منقضی یا تمام‌شده</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button class="btn" id="btnDownload" disabled>
+        <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        خروجی CSV
+      </button>
+      <button class="btn btn-primary" id="btnStart">
+        <svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        شروع اسکن
+      </button>
+    </div>
+  </div>
+
+  <!-- Stats Strip -->
+  <div class="stats-strip">
+    <div class="stat-card">
+      <div class="stat-label">کل اسکن‌شده</div>
+      <div class="stat-value blue" id="statTotal">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">کانفیگ مرده</div>
+      <div class="stat-value red" id="statDead">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">فروش ربات</div>
+      <div class="stat-value yellow" id="statBot">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">پنل‌های اسکن‌شده</div>
+      <div class="stat-value green" id="statPanels">—</div>
+    </div>
+  </div>
+
+  <!-- Progress Panel -->
+  <div class="progress-panel" id="progressPanel">
+    <div class="progress-head">
+      <span class="progress-label" id="progressText">در حال آماده‌سازی...</span>
+      <span class="progress-pct" id="progressPct">0%</span>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+    <div class="log-box" id="logBox"></div>
+  </div>
+
+  <!-- Filter Bar (hidden until results appear) -->
+  <div class="filter-bar" id="filterBar" style="display:none">
+    <input type="text" id="filterKey" placeholder="جستجو در شناسه / پنل..." />
+    <select id="filterReason">
+      <option value="">همه علت‌ها</option>
+      <option value="expired">منقضی‌شده (expired)</option>
+      <option value="limited">تمام‌شده (limited)</option>
+    </select>
+    <select id="filterSold">
+      <option value="">همه انواع</option>
+      <option value="bot">فروش ربات</option>
+      <option value="manual">دستی</option>
+    </select>
+  </div>
+
+  <!-- Results Table -->
+  <div class="result-panel" id="resultPanel">
+    <div class="result-header">
+      <div style="display:flex;align-items:center;gap:0.6rem">
+        <h2>نتایج اسکن</h2>
+        <span class="badge" id="deadBadge">0</span>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>پنل</th>
+            <th>نوع</th>
+            <th>شناسه</th>
+            <th>علت</th>
+            <th>جزئیات</th>
+            <th>فروش</th>
+            <th>ID ربات</th>
+            <th>عملیات</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+      <div class="empty-state" id="emptyState">
+        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        هنوز نتیجه‌ای موجود نیست. اسکن را شروع کنید.
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Toast Container -->
+<div id="toast-container"></div>
+
+<!-- Confirm Modal (delete / renew) -->
+<div class="modal-overlay" id="confirmModal">
+  <div class="modal">
+    <h3 id="confirmTitle">تأیید عملیات</h3>
+    <p id="confirmMsg">آیا مطمئن هستید؟</p>
+    <div class="modal-actions">
+      <button class="btn" id="confirmCancel">انصراف</button>
+      <button class="btn btn-danger" id="confirmOk">تأیید</button>
+    </div>
+  </div>
+</div>
+
+<!-- Set Data Modal -->
+<div class="modal-overlay" id="dataModal">
+  <div class="modal">
+    <h3>تغییر حجم دیتا</h3>
+    <p>مقدار جدید را به گیگابایت وارد کنید. برای نامحدود عدد <strong>0</strong> را وارد کنید.</p>
+    <input class="modal-input" id="dataInput" type="number" min="0" step="0.5" placeholder="مثال: 20" />
+    <div class="modal-actions">
+      <button class="btn" id="dataCancel">انصراف</button>
+      <button class="btn btn-primary" id="dataOk">اعمال</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const token = new URLSearchParams(location.search).get("token") || "";
+
+  /* ── DOM refs ──────────────────────────────────────────── */
+  const btnStart    = document.getElementById("btnStart");
+  const btnDownload = document.getElementById("btnDownload");
+  const progressPanel = document.getElementById("progressPanel");
+  const progressText  = document.getElementById("progressText");
+  const progressPct   = document.getElementById("progressPct");
+  const progressFill  = document.getElementById("progressFill");
+  const logBox        = document.getElementById("logBox");
+  const filterBar     = document.getElementById("filterBar");
+  const filterKey     = document.getElementById("filterKey");
+  const filterReason  = document.getElementById("filterReason");
+  const filterSold    = document.getElementById("filterSold");
+  const tableBody     = document.getElementById("tableBody");
+  const emptyState    = document.getElementById("emptyState");
+  const deadBadge     = document.getElementById("deadBadge");
+  const statTotal     = document.getElementById("statTotal");
+  const statDead      = document.getElementById("statDead");
+  const statBot       = document.getElementById("statBot");
+  const statPanels    = document.getElementById("statPanels");
+
+  /* ── State ─────────────────────────────────────────────── */
+  let allDead = [];       // all dead configs
+  let totalScanned = 0;
+  let panelsScanned = 0;
+
+  /* ── Toast ─────────────────────────────────────────────── */
+  function toast(msg, type = "info") {
+    const el = document.createElement("div");
+    el.className = `toast toast-${type}`;
+    el.textContent = msg;
+    document.getElementById("toast-container").appendChild(el);
+    setTimeout(() => el.remove(), 3000);
+  }
+
+  /* ── Log ───────────────────────────────────────────────── */
+  function log(msg, type = "") {
+    const d = document.createElement("div");
+    d.className = "log-entry" + (type ? " " + type : "");
+    d.textContent = `[${new Date().toLocaleTimeString("fa-IR")}] ${msg}`;
+    logBox.appendChild(d);
+    logBox.scrollTop = logBox.scrollHeight;
+    if (!logBox.classList.contains("visible")) logBox.classList.add("visible");
+  }
+
+  /* ── Progress ──────────────────────────────────────────── */
+  function setProgress(pct, text) {
+    progressFill.style.width = pct + "%";
+    progressPct.textContent = Math.round(pct) + "%";
+    if (text) progressText.textContent = text;
+    if (pct >= 100) progressFill.classList.add("done");
+    else progressFill.classList.remove("done");
+  }
+
+  /* ── Stats ─────────────────────────────────────────────── */
+  function updateStats() {
+    statTotal.textContent   = totalScanned.toLocaleString("fa-IR");
+    statDead.textContent    = allDead.length.toLocaleString("fa-IR");
+    statBot.textContent     = allDead.filter(c => c.isBotSold).length.toLocaleString("fa-IR");
+    statPanels.textContent  = panelsScanned.toLocaleString("fa-IR");
+    deadBadge.textContent   = allDead.length;
+  }
+
+  /* ── Render ─────────────────────────────────────────────── */
+  function renderTable() {
+    const q   = filterKey.value.trim().toLowerCase();
+    const rs  = filterReason.value;
+    const sv  = filterSold.value;
+
+    const visible = allDead.filter((c, idx) => {
+      if (q  && !c.panelKey.toLowerCase().includes(q) && !c.panelName.toLowerCase().includes(q)) return false;
+      if (rs && c.reason !== rs) return false;
+      if (sv === "bot"    && !c.isBotSold) return false;
+      if (sv === "manual" &&  c.isBotSold) return false;
+      c._visibleIdx = idx;
+      return true;
+    });
+
+    tableBody.innerHTML = "";
+    emptyState.style.display = visible.length === 0 ? "block" : "none";
+
+    visible.forEach(c => {
+      const idx = allDead.indexOf(c);
+      const tr = document.createElement("tr");
+      tr.dataset.idx = idx;
+
+      const reasonTag = c.reason === "expired"
+        ? `<span class="tag tag-warning">منقضی</span>`
+        : `<span class="tag tag-danger">محدود</span>`;
+
+      const soldTag = c.isBotSold
+        ? `<span class="tag tag-success">ربات</span>`
+        : `<span class="tag tag-muted">دستی</span>`;
+
+      const typeTag = c.panelType === "marzban"
+        ? `<span class="tag tag-muted" style="color:#a78bfa;background:#a78bfa15">Marzban</span>`
+        : `<span class="tag tag-muted" style="color:#38bdf8;background:#38bdf815">Sanaei</span>`;
+
+      let actions = `<span style="color:var(--text-muted);font-size:0.75rem">—</span>`;
+      if (c.inventoryId && c.isBotSold) {
+        actions = `
+          <button class="btn btn-info btn-sm" onclick="doAction(${idx},'set_data')" title="تغییر دیتا">
+            <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+          <button class="btn btn-success btn-sm" onclick="doAction(${idx},'renew')" title="تمدید">
+            <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          </button>
+          <button class="btn btn-sm" style="background:#eab308;color:#000;border-color:#ca8a04" onclick="doAction(${idx},'change_link')" title="تغییر لینک">
+            <svg viewBox="0 0 24 24"><path d="M2.5 2v6h6M21.5 22v-6h-6"/><path d="M22 11.5A10 10 0 0 0 3.2 7.2M2 12.5a10 10 0 0 0 18.8 4.2"/></svg>
+          </button>
+          <button class="btn btn-sm" style="background:#6366f1;color:#fff;border-color:#4f46e5" onclick="doAction(${idx},'copy_sub')" title="کپی لینک ساب">
+            <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          </button>
+          <button class="btn btn-sm" style="background:#8b5cf6;color:#fff;border-color:#7c3aed" onclick="doAction(${idx},'copy_configs')" title="کپی کانفیگ‌ها">
+            <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+          <button class="btn btn-danger btn-sm" onclick="doAction(${idx},'delete')" title="حذف">
+            <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+          </button>`;
+      }
+
+      tr.innerHTML = `
+        <td>${escHtml(c.panelName)}</td>
+        <td>${typeTag}</td>
+        <td class="ltr">${escHtml(c.panelKey)}</td>
+        <td>${reasonTag}</td>
+        <td class="ltr" style="font-size:0.72rem;color:var(--text-muted)">${escHtml(c.details||'')}</td>
+        <td>${soldTag}</td>
+        <td class="ltr" style="color:var(--text-muted)">${c.inventoryId ? '#'+c.inventoryId : '—'}</td>
+        <td><div class="action-cell">${actions}</div></td>`;
+      tableBody.appendChild(tr);
+    });
+
+    updateStats();
+  }
+
+  filterKey.addEventListener("input", renderTable);
+  filterReason.addEventListener("change", renderTable);
+  filterSold.addEventListener("change", renderTable);
+
+  /* ── HTML escape ────────────────────────────────────────── */
+  function escHtml(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  /* ── Modal helpers ─────────────────────────────────────── */
+  function openConfirm(title, msg, btnLabel, btnClass) {
+    return new Promise(resolve => {
+      document.getElementById("confirmTitle").textContent = title;
+      document.getElementById("confirmMsg").textContent   = msg;
+      const ok  = document.getElementById("confirmOk");
+      const cl  = document.getElementById("confirmCancel");
+      ok.textContent  = btnLabel || "تأیید";
+      ok.className    = "btn " + (btnClass || "btn-danger");
+      document.getElementById("confirmModal").classList.add("open");
+
+      function cleanup(val) {
+        document.getElementById("confirmModal").classList.remove("open");
+        ok.replaceWith(ok.cloneNode(true));  // remove old listeners
+        cl.replaceWith(cl.cloneNode(true));
+        resolve(val);
+      }
+      document.getElementById("confirmOk").addEventListener("click", () => cleanup(true),   {once:true});
+      document.getElementById("confirmCancel").addEventListener("click", () => cleanup(false), {once:true});
+    });
+  }
+
+  function openDataModal() {
+    return new Promise(resolve => {
+      const modal = document.getElementById("dataModal");
+      const input = document.getElementById("dataInput");
+      input.value = "";
+      modal.classList.add("open");
+      input.focus();
+
+      function cleanup(val) {
+        modal.classList.remove("open");
+        document.getElementById("dataOk").replaceWith(document.getElementById("dataOk").cloneNode(true));
+        document.getElementById("dataCancel").replaceWith(document.getElementById("dataCancel").cloneNode(true));
+        resolve(val);
+      }
+      document.getElementById("dataOk").addEventListener("click", () => {
+        // Normalize Persian/Arabic numerals
+        let raw = input.value;
+        const persian = ['۰','۱','۲','۳','۴','۵','۶','۷','۸','۹'];
+        const arabic  = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'];
+        persian.forEach((c,i) => raw = raw.replaceAll(c, i));
+        arabic.forEach((c,i)  => raw = raw.replaceAll(c, i));
+        raw = raw.replace(/[^0-9.]/g, '');
+        const gb = Number(raw);
+        if (raw === '' || isNaN(gb) || gb < 0) {
+          input.style.borderColor = "var(--danger)";
+          setTimeout(() => input.style.borderColor = "", 1000);
+          return;
+        }
+        cleanup(gb);
+      }, {once:true});
+      document.getElementById("dataCancel").addEventListener("click", () => cleanup(null), {once:true});
+    });
+  }
+
+  /* ── Actions ────────────────────────────────────────────── */
+  window.doAction = async function(idx, action) {
+    const config = allDead[idx];
+    if (!config || !config.inventoryId) return;
+
+    let value = null;
+
+    if (action === "set_data") {
+      const gb = await openDataModal();
+      if (gb === null) return;
+      value = gb === 0 ? 0 : gb * 1024 * 1024 * 1024;
+    } else if (action === "renew") {
+      const ok = await openConfirm("تمدید کانفیگ", `کانفیگ «${config.panelKey}» به مدت ۳۰ روز تمدید خواهد شد.`, "تمدید کن", "btn-success");
+      if (!ok) return;
+    } else if (action === "change_link") {
+      const ok = await openConfirm("تغییر لینک", `لینک‌های کانفیگ «${config.panelKey}» تغییر خواهد کرد. مطمئن هستید؟`, "تغییر لینک", "btn-warning");
+      if (!ok) return;
+    } else if (action === "delete") {
+      const ok = await openConfirm("حذف کانفیگ", `کانفیگ «${config.panelKey}» از پنل و دیتابیس حذف خواهد شد. این عملیات غیرقابل بازگشت است!`, "حذف کن", "btn-danger");
+      if (!ok) return;
+    } else if (action === "copy_sub" || action === "copy_configs") {
+      try {
+        const res = await fetch("/api/panel-action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token, action: "get_links", inventoryId: config.inventoryId })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          let textToCopy = "";
+          if (action === "copy_sub") {
+            textToCopy = data.subscriptionUrl;
+            if (!textToCopy) return toast("لینک ساب وجود ندارد", "error");
+          } else {
+            textToCopy = data.configLinks.join("\n");
+            if (!textToCopy) return toast("کانفیگ مستقیمی وجود ندارد", "error");
+          }
+          await navigator.clipboard.writeText(textToCopy);
+          toast("با موفقیت کپی شد ✓", "success");
+        } else {
+          toast("خطا: " + data.error, "error");
+        }
+      } catch (err) {
+        toast("خطای سرور: " + err.message, "error");
+      }
+      return;
+    }
+
+    // Disable all action buttons on this row
+    const row = tableBody.querySelector(`[data-idx="${idx}"]`);
+    if (row) row.querySelectorAll("button").forEach(b => { b.disabled = true; b.style.opacity = "0.4"; });
+
+    try {
+      const res = await fetch("/api/panel-action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, action, inventoryId: config.inventoryId, value })
+      });
+      const data = await res.json();
+
+      if (data.ok) {
+        toast("عملیات با موفقیت انجام شد ✓", "success");
+        if (action === "delete") {
+          allDead.splice(idx, 1);
+        }
+        renderTable();
+      } else {
+        toast("خطا: " + data.error, "error");
+        if (row) row.querySelectorAll("button").forEach(b => { b.disabled = false; b.style.opacity = ""; });
+      }
+    } catch (err) {
+      toast("خطای ارتباط با سرور: " + err.message, "error");
+      if (row) row.querySelectorAll("button").forEach(b => { b.disabled = false; b.style.opacity = ""; });
+    }
+  };
+
+  /* ── CSV Download ───────────────────────────────────────── */
+  btnDownload.addEventListener("click", () => {
+    if (!allDead.length) return;
+    const headers = ["Panel", "Type", "Identifier", "Reason", "Details", "Is Bot Sold", "Inventory ID"];
+    const rows = allDead.map(c => [c.panelName, c.panelType, c.panelKey, c.reason, c.details||"", c.isBotSold?"Yes":"No", c.inventoryId||""]);
+    const csv = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8;"});
+    const a = Object.assign(document.createElement("a"), {href: URL.createObjectURL(blob), download:`dead_configs_${Date.now()}.csv`});
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  });
+
+  /* ── Scan ───────────────────────────────────────────────── */
+  btnStart.addEventListener("click", async () => {
+    if (!token) { toast("توکن معتبر نیست. لطفاً از طریق ربات لینک را دریافت کنید.", "error"); return; }
+
+    btnStart.disabled = true;
+    btnDownload.disabled = true;
+    progressPanel.classList.add("visible");
+    logBox.innerHTML = "";
+    filterBar.style.display = "flex";
+    allDead = []; totalScanned = 0; panelsScanned = 0;
+    renderTable();
+    updateStats();
+
+    try {
+      log("در حال دریافت لیست پنل‌ها...");
+      setProgress(3, "در حال استعلام پنل‌ها...");
+
+      // BUG FIX: scan actions are now POST — panel credentials no longer leak via URL.
+      // The init endpoint only returns panel IDs and names (no credentials).
+      const initRes = await fetch(`/api/find-dead?action=init&token=${token}`);
+      if (!initRes.ok) throw new Error(`خطای سرور (${initRes.status})`);
+      const initData = await initRes.json();
+      if (!initData.ok) throw new Error(initData.error || "خطا در دریافت پنل‌ها");
+
+      const panels = initData.panels;
+      log(`${panels.length} پنل پیدا شد.`, "ok");
+
+      for (let i = 0; i < panels.length; i++) {
+        const p = panels[i];
+        const baseProgress = 5 + (i / panels.length) * 90;
+        setProgress(baseProgress, `اسکن پنل: ${p.name}`);
+        log(`شروع اسکن پنل ${p.name} (${p.type})...`);
+
+        if (p.type === "marzban") {
+          let offset = 0, hasMore = true;
+          while (hasMore) {
+            // BUG FIX: Progress updates inside the pagination loop (was missing).
+            const loopProgress = baseProgress + ((offset > 0 ? Math.min(offset / 2000, 0.9) : 0) * (90 / panels.length));
+            setProgress(loopProgress, `دریافت Marzban (offset ${offset}) — پنل: ${p.name}`);
+            log(`دریافت Marzban offset=${offset}...`);
+
+            const scanRes = await fetch("/api/find-dead", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ token, action: "scan_marzban", panelId: p.id, offset, limit: 500 })
+            });
+            const scanData = await scanRes.json();
+            if (!scanData.ok) { log(`خطا: ${scanData.error}`, "err"); break; }
+
+            scanData.dead.forEach(d => allDead.push({ ...d, panelName: p.name, panelType: p.type }));
+            totalScanned += Number(scanData.scannedCount || 0);
+            renderTable();
+
+            hasMore  = scanData.hasMore;
+            offset   = scanData.nextOffset;
+          }
+
+        } else if (p.type === "sanaei") {
+          log(`دریافت inbound‌ها — پنل: ${p.name}...`);
+          const scanRes = await fetch("/api/find-dead", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token, action: "scan_sanaei", panelId: p.id })
+          });
+          const scanData = await scanRes.json();
+          if (!scanData.ok) { log(`خطا: ${scanData.error}`, "err"); }
+          else {
+            scanData.dead.forEach(d => allDead.push({ ...d, panelName: p.name, panelType: p.type }));
+            totalScanned += Number(scanData.scannedCount || 0);
+            renderTable();
+          }
+        }
+
+        panelsScanned++;
+        updateStats();
+        log(`پنل ${p.name} پایان یافت.`, "ok");
+        setProgress(5 + ((i + 1) / panels.length) * 90, `پنل ${p.name} تمام شد.`);
+      }
+
+      setProgress(100, `اسکن کامل شد — ${allDead.length} کانفیگ مرده پیدا شد`);
+      log(`اسکن به پایان رسید. ${allDead.length} مورد مرده از ${totalScanned} کانفیگ.`, "ok");
+      toast(`اسکن کامل شد — ${allDead.length} کانفیگ مرده`, "success");
+      btnDownload.disabled = allDead.length === 0;
+      btnStart.textContent = "";
+      btnStart.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> اسکن مجدد`;
+
+    } catch (err) {
+      log(`خطای سیستمی: ${err.message}`, "err");
+      toast("خطا: " + err.message, "error");
+      setProgress(0, "خطا در اسکن");
+    }
+
+    btnStart.disabled = false;
+  });
+
+})();
+</script>
+</body>
+</html>

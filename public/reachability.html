@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reachability Checker</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 860px;
+        margin: 30px auto;
+        padding: 0 14px;
+      }
+      h1 {
+        margin-bottom: 10px;
+      }
+      form {
+        display: flex;
+        gap: 8px;
+      }
+      input {
+        flex: 1;
+        padding: 10px;
+      }
+      button {
+        padding: 10px 16px;
+      }
+      pre {
+        margin-top: 16px;
+        padding: 12px;
+        background: #f6f8fa;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Vercel Reachability Checker</h1>
+    <form id="checkForm">
+      <input id="target" type="text" placeholder="example.com or https://example.com" required />
+      <button type="submit">Check</button>
+    </form>
+    <pre id="result">Result will appear here.</pre>
+    <script>
+      const form = document.getElementById("checkForm");
+      const targetInput = document.getElementById("target");
+      const resultEl = document.getElementById("result");
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const target = String(targetInput.value || "").trim();
+        if (!target) return;
+        resultEl.textContent = "Checking...";
+        try {
+          const response = await fetch(`/api/reachability?target=${encodeURIComponent(target)}`);
+          const data = await response.json();
+          resultEl.textContent = JSON.stringify(data, null, 2);
+        } catch (error) {
+          resultEl.textContent = JSON.stringify({ ok: false, error: String(error) }, null, 2);
+        }
+      });
+    </script>
+  </body>
+</html>
