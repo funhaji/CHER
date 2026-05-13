@@ -39,7 +39,7 @@ type OrderRow = {
 };
 type PanelType = "marzban" | "sanaei";
 type PanelWizardMode = "add" | "edit";
-type PanelWizardStep = "name" | "base_url" | "username" | "password";
+type PanelWizardStep = "name" | "base_url" | "username" | "password" | "sub_port";
 type ProductPanelWizardStep = "panel" | "mode" | "sell_limit" | "delivery" | "inbound_id" | "protocol" | "expire_days" | "data_limit_mb";
 type ProductWizardMode = "add" | "edit";
 type ProductKind = "v2ray" | "account";
@@ -1617,6 +1617,7 @@ async function getPanelById(panelId: number) {
       base_url,
       username,
       password,
+      subscription_public_port,
       active,
       allow_customer_migration,
       allow_new_sales,
@@ -1634,6 +1635,11 @@ async function getPanelById(panelId: number) {
 }
 
 function panelWizardPayload(mode: PanelWizardMode, step: PanelWizardStep, panelType: PanelType, panelId?: number, current?: Record<string, unknown>) {
+  const subPortRaw = current?.subscription_public_port;
+  const subscriptionPublicPort =
+    subPortRaw !== undefined && subPortRaw !== null && String(subPortRaw).trim() !== ""
+      ? parseMaybeNumber(subPortRaw)
+      : null;
   return {
     mode,
     step,
@@ -1642,7 +1648,8 @@ function panelWizardPayload(mode: PanelWizardMode, step: PanelWizardStep, panelT
     name: String(current?.name || ""),
     baseUrl: String(current?.base_url || ""),
     username: String(current?.username || ""),
-    password: String(current?.password || "")
+    password: String(current?.password || ""),
+    subscriptionPublicPort: subscriptionPublicPort !== null && subscriptionPublicPort > 0 ? subscriptionPublicPort : null
   };
 }
 
@@ -1667,33 +1674,47 @@ async function promptPanelWizardStep(chatId: number, payload: Record<string, unk
   const mode = String(payload.mode || "add") as PanelWizardMode;
   const step = String(payload.step || "name") as PanelWizardStep;
   const panelId = Number(payload.panelId || 0);
+  const panelType = String(payload.panelType || "") as PanelType;
+  const totalSteps = panelType === "sanaei" ? 5 : 4;
   const keepHint = mode === "edit" ? "\nبرای نگه داشتن مقدار فعلی، فقط - بفرستید." : "";
   let text = "";
   if (step === "name") {
     text =
-      `مرحله 1 از 4 - نام پنل\n` +
-      `نوع: ${panelTypeTitle(String(payload.panelType || ""))}` +
+      `مرحله 1 از ${totalSteps} - نام پنل\n` +
+      `نوع: ${panelTypeTitle(panelType)}` +
       (mode === "edit" ? `\nمقدار فعلی: ${String(payload.name || "-")}` : "") +
       `${keepHint}\n\nنام پنل را بفرستید.`;
   }
   if (step === "base_url") {
     text =
-      `مرحله 2 از 4 - آدرس پنل\n` +
-      `نوع: ${panelTypeTitle(String(payload.panelType || ""))}` +
+      `مرحله 2 از ${totalSteps} - آدرس پنل\n` +
+      `نوع: ${panelTypeTitle(panelType)}` +
       (mode === "edit" ? `\nمقدار فعلی: ${String(payload.baseUrl || "-")}` : "") +
       `${keepHint}\n\nآدرس کامل را بفرستید.\nنمونه:\nhttps://panel.example.com`;
   }
   if (step === "username") {
     text =
-      `مرحله 3 از 4 - نام کاربری\n` +
+      `مرحله 3 از ${totalSteps} - نام کاربری\n` +
       (mode === "edit" ? `مقدار فعلی: ${String(payload.username || "-")}` : "") +
       `${keepHint}\n\nنام کاربری پنل را بفرستید.`;
   }
   if (step === "password") {
     text =
-      `مرحله 4 از 4 - رمز عبور\n` +
+      `مرحله 4 از ${totalSteps} - رمز عبور\n` +
       (mode === "edit" ? `مقدار فعلی: ${maskSecret(String(payload.password || ""))}` : "") +
       `${keepHint}\n\nرمز عبور پنل را بفرستید.`;
+  }
+  if (step === "sub_port") {
+    const cur =
+      payload.subscriptionPublicPort !== undefined && payload.subscriptionPublicPort !== null
+        ? String(payload.subscriptionPublicPort)
+        : "خودکار (پورت آدرس پنل)";
+    text =
+      `مرحله 5 از 5 - پورت عمومی لینک سابسکریپشن (فقط Sanaei / 3x-ui)\n` +
+      `اگر ساب روی پورت دیگری سرو می‌شود (مثلاً 8080)، همان را بفرستید.\n` +
+      `0 یا auto = همان پورتی که در آدرس پنل است\n` +
+      (mode === "edit" ? `مقدار فعلی: ${cur}\nبرای نگه داشتن مقدار فعلی، - بفرستید.\n` : "") +
+      `\nپورت را بفرستید (۱–۶۵۵۳۵).`;
   }
   await tg("sendMessage", {
     chat_id: chatId,
@@ -2488,6 +2509,13 @@ async function showPanelDetails(chatId: number, panelId: number, notice?: string
       `نام: ${panel.name}\n` +
       `نوع: ${panelTypeTitle(String(panel.panel_type))}\n` +
       `آدرس: ${panel.base_url}\n` +
+      (String(panel.panel_type) === "sanaei"
+        ? `پورت لینک ساب (عمومی): ${
+            panel.subscription_public_port != null && Number(panel.subscription_public_port) > 0
+              ? Number(panel.subscription_public_port)
+              : "همان پورت آدرس پنل"
+          }\n`
+        : "") +
       `یوزرنیم: ${panel.username || "-"}\n` +
       `وضعیت: ${panel.active ? "فعال" : "غیرفعال"}\n` +
       `فروش جدید: ${panel.allow_new_sales ? "روشن" : "خاموش"}\n` +
@@ -2503,6 +2531,9 @@ async function showPanelDetails(chatId: number, panelId: number, notice?: string
           cb("✏️ ویرایش", `admin_panel_edit_${panel.id}`, "primary"),
           cb("🧪 تست", `admin_panel_test_${panel.id}`, "primary")
         ],
+        ...(String(panel.panel_type) === "sanaei"
+          ? [[cb("🔢 پورت ساب", `admin_panel_set_subport_${panel.id}`, "primary")]]
+          : []),
         [
           cb(panel.active ? "⛔ غیرفعال" : "✅ فعال", `admin_panel_toggle_${panel.id}`, panel.active ? "danger" : "success"),
           cb(
@@ -3311,6 +3342,7 @@ type PanelLookupHit = {
   panelName: string;
   panelBaseUrl: string;
   panelType: "marzban" | "sanaei";
+  subscriptionPublicPort: number | null;
   ownerTelegramId: number | null;
   panelUserKey: string;
   panelUser: Record<string, unknown>;
@@ -3356,7 +3388,7 @@ async function performRegenLink(
   }
   
   const panelRows = await sql`
-    SELECT id, panel_type, base_url, username, password
+    SELECT id, panel_type, base_url, username, password, subscription_public_port
     FROM panels
     WHERE id = ${panelId}
     LIMIT 1;
@@ -3390,6 +3422,10 @@ async function performRegenLink(
       newUuid = String((result.client as any).id || "");
       const panelConfig = (typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : (row.panel_config as Record<string, unknown>)) || {};
       newConfigLinks = buildSanaeiConfigLinks(String(panelRows[0].base_url), result.inbound as Record<string, unknown>, result.client as Record<string, unknown>, panelConfig);
+      const subId = String((result.client as Record<string, unknown>).subId || "");
+      newSubscriptionUrl = subId
+        ? buildSanaeiSubscriptionUrl(String(panelRows[0].base_url), panelConfig, subId, panelRows[0] as Record<string, unknown>)
+        : undefined;
     } else {
       regenMessage = `خطا در تغییر لینک: ${result.message}`;
       await tg("sendMessage", { chat_id: chatId, text: regenMessage });
@@ -3445,7 +3481,7 @@ async function lookupIdentifierInPanels(raw: string): Promise<PanelLookupHit | P
   const identifier = raw.trim();
   if (!identifier) return { ok: false, message: "empty_identifier" };
   const panels = await sql`
-    SELECT id, name, panel_type, base_url, username, password, active
+    SELECT id, name, panel_type, base_url, username, password, active, subscription_public_port
     FROM panels
     WHERE active = TRUE
     ORDER BY priority DESC, id ASC;
@@ -3464,6 +3500,7 @@ async function lookupIdentifierInPanels(raw: string): Promise<PanelLookupHit | P
           panelName: String(panel.name),
           panelBaseUrl: String(panel.base_url || ""),
           panelType: "marzban",
+          subscriptionPublicPort: null,
           ownerTelegramId: ownerTg,
           panelUserKey: String((found.user as Record<string, unknown>).username || identifier),
           panelUser: found.user
@@ -3475,6 +3512,7 @@ async function lookupIdentifierInPanels(raw: string): Promise<PanelLookupHit | P
         const client = found.client as Record<string, unknown>;
         const ownerTg = parsePanelUserTelegramId(client.tgId || client.email || "");
         const panelUserKey = String(client.id || client.subId || client.email || identifier);
+        const subPort = parseMaybeNumber(panel.subscription_public_port);
         return {
           ok: true,
           source: "panel",
@@ -3482,6 +3520,7 @@ async function lookupIdentifierInPanels(raw: string): Promise<PanelLookupHit | P
           panelName: String(panel.name),
           panelBaseUrl: String(panel.base_url || ""),
           panelType: "sanaei",
+          subscriptionPublicPort: subPort !== null && subPort > 0 ? subPort : null,
           ownerTelegramId: ownerTg,
           panelUserKey,
           panelUser: client,
@@ -3683,9 +3722,49 @@ function parseSanaeiNested(raw: unknown) {
   return raw;
 }
 
-export function buildSanaeiSubscriptionUrl(baseUrl: string, panelConfig: Record<string, unknown>, subId: string) {
+function resolveSanaeiSubscriptionPublicPort(panelConfig: Record<string, unknown>, panelRow?: Record<string, unknown> | null) {
+  const fromRow = panelRow ? parseMaybeNumber(panelRow.subscription_public_port) : null;
+  if (fromRow !== null && fromRow > 0 && fromRow <= 65535) return fromRow;
+  const fromConfig = parseMaybeNumber(panelConfig.subscription_public_port ?? panelConfig.sub_link_port);
+  if (fromConfig !== null && fromConfig > 0 && fromConfig <= 65535) return fromConfig;
+  return null;
+}
+
+/** Subscription URL for 3x-ui; optional panel row supplies subscription_public_port when it differs from panel UI port. */
+export function buildSanaeiSubscriptionUrl(
+  baseUrl: string,
+  panelConfig: Record<string, unknown>,
+  subId: string,
+  panelRow?: Record<string, unknown> | null
+) {
   const customPath = String(panelConfig.subscription_path || panelConfig.sub_path || "sub").replace(/^\/+|\/+$/g, "");
-  return `${normalizeBaseUrl(baseUrl)}/${customPath}/${encodeURIComponent(subId)}`;
+  const portOverride = resolveSanaeiSubscriptionPublicPort(panelConfig, panelRow);
+  let root = normalizeBaseUrl(baseUrl);
+  if (portOverride !== null) {
+    try {
+      const u = new URL(root);
+      u.port = String(portOverride);
+      const path = u.pathname.replace(/\/+$/, "");
+      root = `${u.origin}${path === "/" ? "" : path}`;
+    } catch {
+      /* keep root */
+    }
+  }
+  return `${root}/${customPath}/${encodeURIComponent(subId)}`;
+}
+
+function sanaeiSubscriptionUrlsMatchSubId(storedUrl: string, canonicalUrl: string) {
+  try {
+    const ua = new URL(storedUrl.trim());
+    const ub = new URL(canonicalUrl.trim());
+    if (ua.hostname !== ub.hostname) return false;
+    const sa = ua.pathname.split("/").filter(Boolean);
+    const sb = ub.pathname.split("/").filter(Boolean);
+    if (!sa.length || !sb.length) return false;
+    return decodeURIComponent(sa[sa.length - 1] || "") === decodeURIComponent(sb[sb.length - 1] || "");
+  } catch {
+    return storedUrl.trim() === canonicalUrl.trim();
+  }
 }
 
 function extractSanaeiHost(panelBaseUrl: string, panelConfig: Record<string, unknown>, inbound: Record<string, unknown>) {
@@ -3966,7 +4045,7 @@ async function provisionSanaeiSale(
     throw new Error(`Sanaei create client failed: ${res.status} ${responseSnippet(raw)}`);
   }
   const configLinks = buildSanaeiConfigLinks(String(panel.base_url), inbound, toJsonObject(client) || {}, panelConfig);
-  const subscriptionUrl = buildSanaeiSubscriptionUrl(String(panel.base_url), panelConfig, subId);
+  const subscriptionUrl = buildSanaeiSubscriptionUrl(String(panel.base_url), panelConfig, subId, panel);
   
   const deliveryMode = String(order.panel_delivery_mode || "both");
   const finalLinks = deliveryMode === "sub" ? [] : configLinks;
@@ -6882,7 +6961,9 @@ async function parseAndApplyState(
     const panelSubscriptionUrl =
       String(panelUser.subscription_url || panelUser.subscriptionUrl || "").trim() ||
       (String(panelMatch.panelType || "") === "sanaei" && panelUser.subId && panelMatch.panelBaseUrl
-        ? buildSanaeiSubscriptionUrl(String(panelMatch.panelBaseUrl), {}, String(panelUser.subId))
+        ? buildSanaeiSubscriptionUrl(String(panelMatch.panelBaseUrl), {}, String(panelUser.subId), {
+            subscription_public_port: panelMatch.subscriptionPublicPort ?? undefined
+          })
         : "");
     const panelRuntimeLine =
       String(panelMatch.panelType || "") === "marzban"
@@ -7658,6 +7739,34 @@ async function parseAndApplyState(
     await tg("sendMessage", { chat_id: chatId, text: "کانفیگ برای کاربر ارسال شد ✅" });
     return true;
   }
+  if (state.state === "admin_panel_subport_edit") {
+    const panelId = Number(state.payload.panelId || 0);
+    if (!Number.isFinite(panelId) || panelId <= 0) {
+      await clearState(userId);
+      await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+      return true;
+    }
+    const raw = text.trim();
+    if (raw === "-") {
+      await clearState(userId);
+      await showPanelDetails(chatId, panelId, "تغییر پورت ساب لغو شد.");
+      return true;
+    }
+    const lt = raw.toLowerCase();
+    if (lt === "0" || lt === "auto") {
+      await sql`UPDATE panels SET subscription_public_port = NULL WHERE id = ${panelId}`;
+    } else {
+      const n = parseMaybeNumber(raw);
+      if (n === null || n < 1 || n > 65535) {
+        await tg("sendMessage", { chat_id: chatId, text: "پورت نامعتبر است. عدد ۱ تا ۶۵۵۳۵، یا 0/auto برای خودکار." });
+        return true;
+      }
+      await sql`UPDATE panels SET subscription_public_port = ${n} WHERE id = ${panelId}`;
+    }
+    await clearState(userId);
+    await showPanelDetails(chatId, panelId, "پورت لینک ساب ذخیره شد ✅");
+    return true;
+  }
   if (state.state === "admin_panel_wizard") {
     const mode = String(state.payload.mode || "add") as PanelWizardMode;
     const step = String(state.payload.step || "name") as PanelWizardStep;
@@ -7727,13 +7836,23 @@ async function parseAndApplyState(
         await tg("sendMessage", { chat_id: chatId, text: "رمز عبور پنل الزامی است." });
         return true;
       }
+      if (panelType === "sanaei") {
+        const payload = { ...state.payload, step: "sub_port" as PanelWizardStep, password };
+        await setState(userId, "admin_panel_wizard", payload);
+        await promptPanelWizardStep(chatId, payload);
+        return true;
+      }
       try {
         if (mode === "add") {
           await sql`
-            INSERT INTO panels (name, panel_type, base_url, username, password)
-            VALUES (${name}, ${panelType}, ${baseUrl}, ${username}, ${password})
+            INSERT INTO panels (name, panel_type, base_url, username, password, subscription_public_port)
+            VALUES (${name}, ${panelType}, ${baseUrl}, ${username}, ${password}, NULL)
             ON CONFLICT (name) DO UPDATE
-            SET panel_type = EXCLUDED.panel_type, base_url = EXCLUDED.base_url, username = EXCLUDED.username, password = EXCLUDED.password;
+            SET panel_type = EXCLUDED.panel_type,
+                base_url = EXCLUDED.base_url,
+                username = EXCLUDED.username,
+                password = EXCLUDED.password,
+                subscription_public_port = panels.subscription_public_port;
           `;
           const idRows = await sql`SELECT id FROM panels WHERE name = ${name} LIMIT 1;`;
           await clearState(userId);
@@ -7755,6 +7874,93 @@ async function parseAndApplyState(
         await sql`
           UPDATE panels
           SET name = ${name}, panel_type = ${panelType}, base_url = ${baseUrl}, username = ${username}, password = ${password}
+          WHERE id = ${panelId};
+        `;
+        await clearState(userId);
+        const test = await testPanelConnection(panelId);
+        logInfo("panel_updated", { panelId, panelType, name, baseUrl, testOk: test.ok });
+        await showPanelDetails(chatId, panelId, `اطلاعات پنل بروزرسانی شد ✅\n${test.message}`);
+        return true;
+      } catch (error) {
+        await clearState(userId);
+        if (mode === "add") {
+          logError("panel_save_failed", error, { panelType, name, baseUrl, userId });
+          await tg("sendMessage", {
+            chat_id: chatId,
+            text: `ذخیره پنل انجام نشد.\n${String((error as Error).message || error)}`
+          });
+          return true;
+        }
+        logError("panel_update_failed", error, { panelId, panelType, name, baseUrl, userId });
+        await tg("sendMessage", {
+          chat_id: chatId,
+          text: `بروزرسانی پنل انجام نشد.\n${String((error as Error).message || error)}`
+        });
+        return true;
+      }
+    }
+    if (step === "sub_port") {
+      if (panelType !== "sanaei") {
+        await clearState(userId);
+        await tg("sendMessage", { chat_id: chatId, text: "مرحله پورت ساب فقط برای Sanaei معتبر است." });
+        return true;
+      }
+      const name = String(state.payload.name || "");
+      const baseUrl = String(state.payload.baseUrl || "");
+      const username = String(state.payload.username || "");
+      const password = String(state.payload.password || "");
+      const lt = raw.trim().toLowerCase();
+      let subscriptionPublicPort: number | null = null;
+      if (mode === "edit" && raw === "-") {
+        subscriptionPublicPort = parseMaybeNumber(state.payload.subscriptionPublicPort);
+      } else if (raw === "" || lt === "0" || lt === "auto") {
+        subscriptionPublicPort = null;
+      } else {
+        const n = parseMaybeNumber(raw);
+        if (n === null || n < 1 || n > 65535) {
+          await tg("sendMessage", { chat_id: chatId, text: "پورت نامعتبر است. عدد ۱ تا ۶۵۵۳۵، یا 0/auto برای خودکار." });
+          return true;
+        }
+        subscriptionPublicPort = n;
+      }
+      try {
+        if (mode === "add") {
+          await sql`
+            INSERT INTO panels (name, panel_type, base_url, username, password, subscription_public_port)
+            VALUES (${name}, ${panelType}, ${baseUrl}, ${username}, ${password}, ${subscriptionPublicPort})
+            ON CONFLICT (name) DO UPDATE
+            SET panel_type = EXCLUDED.panel_type,
+                base_url = EXCLUDED.base_url,
+                username = EXCLUDED.username,
+                password = EXCLUDED.password,
+                subscription_public_port = EXCLUDED.subscription_public_port;
+          `;
+          const idRows = await sql`SELECT id FROM panels WHERE name = ${name} LIMIT 1;`;
+          await clearState(userId);
+          if (!idRows.length) {
+            await tg("sendMessage", { chat_id: chatId, text: "پنل ذخیره شد ✅" });
+            return true;
+          }
+          const savedPanelId = Number(idRows[0].id);
+          const test = await testPanelConnection(savedPanelId);
+          logInfo("panel_saved", { panelId: savedPanelId, panelType, name, baseUrl, testOk: test.ok });
+          await showPanelDetails(chatId, savedPanelId, `پنل ذخیره شد ✅\n${test.message}`);
+          return true;
+        }
+        if (!Number.isFinite(panelId) || panelId <= 0) {
+          await clearState(userId);
+          await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل معتبر نیست." });
+          return true;
+        }
+        await sql`
+          UPDATE panels
+          SET
+            name = ${name},
+            panel_type = ${panelType},
+            base_url = ${baseUrl},
+            username = ${username},
+            password = ${password},
+            subscription_public_port = ${subscriptionPublicPort}
           WHERE id = ${panelId};
         `;
         await clearState(userId);
@@ -9806,6 +10012,7 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
   }
   const row = rows[0];
   const delivery = parseDeliveryPayload(row.delivery_payload);
+  let displayDelivery = delivery;
   const revoked = delivery.metadata?.revoked === true;
   const isPanelConfig = Boolean(delivery.metadata?.panelType) && String(delivery.metadata?.panelType || "") !== "manual";
   const panelId = Number(row.panel_id || 0);
@@ -9838,7 +10045,12 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
           const subId = String((found.client as Record<string, unknown>).subId || "");
           const panelConfig = typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : (row.panel_config as Record<string, unknown>);
           if (subId) {
-            panelSubLink = buildSanaeiSubscriptionUrl(String(panel.base_url), panelConfig || {}, subId).trim();
+            panelSubLink = buildSanaeiSubscriptionUrl(
+              String(panel.base_url),
+              panelConfig || {},
+              subId,
+              panel as Record<string, unknown>
+            ).trim();
           }
         } else if (found.message !== "client_not_found") {
           panelError = true;
@@ -9846,7 +10058,11 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
       }
 
       if (!panelError) {
-        const mismatch = !foundOnPanel || (userSubLink && panelSubLink && userSubLink !== panelSubLink) || (!panelSubLink && userSubLink);
+        const linkMismatch =
+          panelType === "sanaei" && userSubLink && panelSubLink
+            ? !sanaeiSubscriptionUrlsMatchSubId(userSubLink, panelSubLink)
+            : Boolean(userSubLink && panelSubLink && userSubLink !== panelSubLink);
+        const mismatch = !foundOnPanel || linkMismatch || (!panelSubLink && userSubLink);
         if (mismatch) {
           await sql`
             WITH
@@ -9867,6 +10083,18 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
           await tg("sendMessage", { chat_id: chatId, text: "کانفیگ در پنل یافت نشد یا لینک آن تغییر کرده است. این کانفیگ از لیست شما حذف شد." });
           return;
         }
+        if (panelType === "sanaei" && foundOnPanel && panelSubLink) {
+          const primaryText =
+            delivery.subscriptionUrl && delivery.primaryText === delivery.subscriptionUrl
+              ? panelSubLink
+              : delivery.primaryText;
+          displayDelivery = {
+            ...delivery,
+            subscriptionUrl: panelSubLink,
+            primaryQr: buildQrText(delivery.primaryText, delivery.configLinks || [], panelSubLink),
+            primaryText: primaryText || delivery.primaryText
+          };
+        }
       }
     }
   }
@@ -9886,7 +10114,7 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
     chatId,
     String(row.purchase_id || "-"),
     String(row.config_value),
-    delivery,
+    displayDelivery,
     keyboard,
     `محصول: ${row.name}`
   );
@@ -11818,7 +12046,7 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     const key = userToggleMatch ? decodeURIComponent(userToggleMatch[2]) : "";
 
     const rows = await sql`
-      SELECT id, panel_type, base_url, username, password
+      SELECT id, panel_type, base_url, username, password, subscription_public_port
       FROM panels
       WHERE id = ${panelId}
       LIMIT 1;
@@ -11900,7 +12128,7 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     const panelId = Number(firstUnderscore >= 0 ? payload.slice(0, firstUnderscore) : "0");
     const key = decodeURIComponent(firstUnderscore >= 0 ? payload.slice(firstUnderscore + 1) : "");
     const rows = await sql`
-      SELECT id, panel_type, base_url, username, password
+      SELECT id, panel_type, base_url, username, password, subscription_public_port
       FROM panels
       WHERE id = ${panelId}
       LIMIT 1;
@@ -11933,7 +12161,7 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
       const panelConfig = panelConfigRows.length ? (typeof panelConfigRows[0].panel_config === "string" ? parseJsonObject(panelConfigRows[0].panel_config) : (panelConfigRows[0].panel_config as Record<string, unknown>)) || {} : {};
       const newConfigLinks = buildSanaeiConfigLinks(String(rows[0].base_url), (result as any).inbound as Record<string, unknown>, (result as any).client as Record<string, unknown>, panelConfig);
       const subId = String((result as any).client?.subId || "");
-      const subUrl = subId ? buildSanaeiSubscriptionUrl(String(rows[0].base_url), panelConfig, subId) : "";
+      const subUrl = subId ? buildSanaeiSubscriptionUrl(String(rows[0].base_url), panelConfig, subId, rows[0] as Record<string, unknown>) : "";
       newLinkMsg = subUrl || newConfigLinks[0] || "";
     }
 
@@ -11978,7 +12206,7 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     const panelId = Number(firstUnderscore >= 0 ? payload.slice(0, firstUnderscore) : "0");
     const key = decodeURIComponent(firstUnderscore >= 0 ? payload.slice(firstUnderscore + 1) : "");
     const rows = await sql`
-      SELECT id, panel_type, base_url, username, password
+      SELECT id, panel_type, base_url, username, password, subscription_public_port
       FROM panels
       WHERE id = ${panelId}
       LIMIT 1;
@@ -12022,9 +12250,40 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     await promptPanelTypePicker(chatId, "add");
     return;
   }
-  if (/^noop_panel_\d+$/.test(data) || data.startsWith("admin_panel_open_")) {
+  if (/^noop_panel_\d+$/.test(data)) {
     const panelId = Number((data.match(/\d+$/) || ["0"])[0]);
     await showPanelDetails(chatId, panelId);
+    return;
+  }
+  if (data.startsWith("admin_panel_open_")) {
+    const panelId = Number((data.match(/\d+$/) || ["0"])[0]);
+    await clearState(userId);
+    await showPanelDetails(chatId, panelId);
+    return;
+  }
+  if (data.startsWith("admin_panel_set_subport_")) {
+    const panelId = Number(data.replace("admin_panel_set_subport_", ""));
+    if (!Number.isFinite(panelId) || panelId <= 0) {
+      await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+      return;
+    }
+    const panel = await getPanelById(panelId);
+    if (!panel || String(panel.panel_type) !== "sanaei") {
+      await tg("sendMessage", { chat_id: chatId, text: "این گزینه فقط برای پنل Sanaei / 3x-ui است." });
+      return;
+    }
+    const cur =
+      panel.subscription_public_port != null && Number(panel.subscription_public_port) > 0
+        ? String(panel.subscription_public_port)
+        : "خودکار (پورت آدرس پنل)";
+    await setState(userId, "admin_panel_subport_edit", { panelId });
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text:
+        `🔢 پورت عمومی لینک سابسکریپشن\nپنل: ${panel.name}\nفعلی: ${cur}\n\n` +
+        `عدد ۱–۶۵۵۳۵ بفرستید (مثلاً 8080).\n0 یا auto = همان پورت آدرس پنل\n- = انصراف`,
+      reply_markup: { inline_keyboard: [[{ text: "❌ انصراف", callback_data: `admin_panel_open_${panelId}` }]] }
+    });
     return;
   }
   if (data.startsWith("admin_panel_edit_")) {
