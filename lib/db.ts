@@ -75,9 +75,10 @@ function postgresClientOptions(
     idle_timeout: 20,
     connect_timeout: 30,
     prepare: !transactionPooler,
-    // ADD COLUMN IF NOT EXISTS still emits NOTICE 42701 when the column exists — expected on every warm start.
+    // IF NOT EXISTS still emits notices on repeat runs (schema/table/index/column already there).
     onnotice: (notice) => {
-      if (notice.code === "42701") return;
+      const code = notice.code;
+      if (code === "42701" || code === "42P06" || code === "42P07") return;
       console.log(notice);
     }
   };
