@@ -1,6 +1,6 @@
 import { neon } from "@neondatabase/serverless";
 import postgres from "postgres";
-import { databaseDriver, databaseUrl } from "./env.js";
+import { databaseDriver, databaseUrl, env } from "./env.js";
 
 function dbHostname(url: string): string {
   try {
@@ -11,6 +11,32 @@ function dbHostname(url: string): string {
   }
 }
 
+function isSupabaseHost(url: string): boolean {
+  const h = dbHostname(url);
+  return h.includes("supabase.co") || h.includes("pooler.supabase.com");
+}
+
+/**
+ * Where bot tables live. Supabase projects often already have `public.products` (or other names we use),
+ * so we default to a dedicated schema there. Neon / local Postgres keep `public` unless overridden.
+ */
+function resolveDatabaseSchema(url: string, explicit: string | undefined): string | null {
+  const t = explicit?.trim();
+  if (t === "public") return null;
+  if (t) {
+    if (!/^[_a-z][_a-z0-9]*$/i.test(t)) {
+      throw new Error("DATABASE_SCHEMA must be a simple identifier or the literal 'public'");
+    }
+    return t.toLowerCase();
+  }
+  if (isSupabaseHost(url)) return "telegram_seller";
+  return null;
+}
+
+const resolvedSchema = resolveDatabaseSchema(databaseUrl, env.DATABASE_SCHEMA);
+
+export const databaseAppSchema: string | null = resolvedSchema;
+
 function useNeonServerless(url: string, driver: typeof databaseDriver): boolean {
   if (driver === "neon") return true;
   if (driver === "postgres") return false;
@@ -18,7 +44,22 @@ function useNeonServerless(url: string, driver: typeof databaseDriver): boolean 
   return host.endsWith(".neon.tech") || host.includes(".neon.tech");
 }
 
-function postgresClientOptions(url: string): NonNullable<Parameters<typeof postgres>[1]> {
+function databaseUrlWithSearchPath(url: string, schema: string | null): string {
+  if (!schema) return url;
+  if (/[?&]options=/i.test(url)) {
+    throw new Error(
+      "DATABASE_URL/POSTGRES_URL must not contain options= when using DATABASE_SCHEMA (or Supabase auto-schema). Remove options= from the URL or set DATABASE_SCHEMA=public."
+    );
+  }
+  const opt = encodeURIComponent(`-c search_path=${schema},public`);
+  const joiner = url.includes("?") ? "&" : "?";
+  return `${url}${joiner}options=${opt}`;
+}
+
+function postgresClientOptions(
+  url: string,
+  applicationSchema: string | null
+): NonNullable<Parameters<typeof postgres>[1]> {
   const host = dbHostname(url);
   let port = "5432";
   try {
@@ -29,12 +70,19 @@ function postgresClientOptions(url: string): NonNullable<Parameters<typeof postg
   }
   const transactionPooler =
     host.includes("pooler.supabase.com") || port === "6543";
-  return {
+  const base: NonNullable<Parameters<typeof postgres>[1]> = {
     max: 1,
     idle_timeout: 20,
     connect_timeout: 30,
     prepare: !transactionPooler
   };
+  if (applicationSchema) {
+    base.connection = {
+      ...base.connection,
+      search_path: `${applicationSchema},public`
+    };
+  }
+  return base;
 }
 
 /** Tagged template SQL — Neon serverless or TCP Postgres (Supabase, local, …). */
@@ -43,11 +91,21 @@ export type Sql = (
   ...values: readonly unknown[]
 ) => Promise<any[]>;
 
+const useNeon = useNeonServerless(databaseUrl, databaseDriver);
+
 export const sql: Sql = (
-  useNeonServerless(databaseUrl, databaseDriver)
-    ? neon(databaseUrl)
-    : postgres(databaseUrl, postgresClientOptions(databaseUrl))
+  useNeon
+    ? neon(databaseUrlWithSearchPath(databaseUrl, resolvedSchema))
+    : postgres(databaseUrl, postgresClientOptions(databaseUrl, resolvedSchema))
 ) as Sql;
+
+async function runDdl(statement: string): Promise<void> {
+  if (useNeon) {
+    await (sql as unknown as (q: string, p?: readonly unknown[]) => Promise<unknown>)(statement, []);
+    return;
+  }
+  await (sql as unknown as { unsafe: (q: string) => Promise<unknown> }).unsafe(statement);
+}
 
 let schemaReady: Promise<void> | null = null;
 
@@ -116,6 +174,9 @@ export async function resetBusinessDataPreserveCaches() {
 export function ensureSchema() {
   if (!schemaReady) {
     schemaReady = (async () => {
+      if (resolvedSchema) {
+        await runDdl(`CREATE SCHEMA IF NOT EXISTS ${resolvedSchema}`);
+      }
       await sql`
         CREATE TABLE IF NOT EXISTS users (
           telegram_id BIGINT PRIMARY KEY,

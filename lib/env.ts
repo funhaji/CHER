@@ -6,6 +6,11 @@ const schema = z.object({
   POSTGRES_URL: z.string().optional(),
   /** auto: Neon host → @neondatabase/serverless; otherwise TCP postgres (Supabase, local, …). */
   DATABASE_DRIVER: z.enum(["auto", "neon", "postgres"]).default("auto"),
+  /**
+   * Postgres schema for bot tables. Default on Supabase hosts: `telegram_seller` (avoids clashes with `public.products`, etc.).
+   * Set to `public` to force the default schema (not recommended on Supabase if `public.products` already exists).
+   */
+  DATABASE_SCHEMA: z.string().optional(),
   ADMIN_IDS: z.string().default(""),
   PUBLIC_BASE_URL: z.string().url().optional(),
   TRONADO_API_KEY: z.string().optional(),
