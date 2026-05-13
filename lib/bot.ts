@@ -5057,7 +5057,7 @@ async function parseAndApplyState(
         AND telegram_id = ${userId}
         AND status = 'pending'
         AND payment_method = 'crypto'
-      RETURNING id, purchase_id, product_name_snapshot, final_price, crypto_currency, crypto_network, crypto_amount, crypto_address;
+      RETURNING id, purchase_id, product_name_snapshot, panel_delivery_mode, final_price, crypto_currency, crypto_network, crypto_amount, crypto_address;
     `;
     await clearState(userId);
     if (!rows.length) {
@@ -5075,6 +5075,7 @@ async function parseAndApplyState(
     `;
     const tgUsername = profileRows.length && profileRows[0].username ? `@${String(profileRows[0].username)}` : "-";
     const tgFullName = [profileRows[0]?.first_name, profileRows[0]?.last_name].filter(Boolean).join(" ").trim() || "-";
+    const directCryptoDeliveryLabel = formatDeliveryModeLabel(parseDeliveryMode(String(rows[0].panel_delivery_mode || "")));
     const caption =
       `🪙 درخواست تایید پرداخت کریپتو\n` +
       `سفارش: ${rows[0].purchase_id}\n` +
@@ -5082,6 +5083,7 @@ async function parseAndApplyState(
       `یوزرنیم: ${tgUsername}\n` +
       `نام: ${tgFullName}\n` +
       `محصول: ${rows[0].product_name_snapshot || "-"}\n` +
+      `تحویل: ${directCryptoDeliveryLabel}\n` +
       `مبلغ: ${formatPriceToman(Number(rows[0].final_price))} تومان\n` +
       `ارز: ${rows[0].crypto_currency || "-"}\n` +
       `شبکه: ${rows[0].crypto_network || "-"}\n` +
@@ -5232,6 +5234,7 @@ async function parseAndApplyState(
         o.plisio_txn_id,
         o.plisio_invoice_url,
         o.plisio_status,
+        o.panel_delivery_mode,
         COALESCE(o.product_name_snapshot, p.name) AS product_name,
         u.username,
         u.first_name,
@@ -5259,6 +5262,7 @@ async function parseAndApplyState(
       if (o.tronado_token) extraLines.push(`authority: ${String(o.tronado_token)}`);
       if (o.tronado_payment_url) extraLines.push(`لینک پرداخت: ${String(o.tronado_payment_url)}`);
     }
+    const cryptoDeliveryLabel = formatDeliveryModeLabel(parseDeliveryMode(String(o.panel_delivery_mode || "")));
     const caption =
       `رسید پرداخت کریپتو ارسال شد\n` +
       `سفارش: ${String(o.purchase_id || "-")}\n` +
@@ -5266,6 +5270,7 @@ async function parseAndApplyState(
       `یوزرنیم: ${username}\n` +
       `نام: ${fullName}\n` +
       `محصول: ${String(o.product_name || "-")}\n` +
+      `تحویل: ${cryptoDeliveryLabel}\n` +
       `مبلغ: ${formatPriceToman(Number(o.final_price || 0))} تومان\n` +
       `روش پرداخت: ${method}` +
       (walletUsed > 0 ? `\nکسر از کیف پول: ${formatPriceToman(walletUsed)} تومان` : "") +
@@ -5311,7 +5316,7 @@ async function parseAndApplyState(
           AND telegram_id = ${userId}
           AND status = 'awaiting_receipt'
           AND payment_method = 'card2card'
-        RETURNING purchase_id, final_price, payment_method, wallet_used;
+        RETURNING purchase_id, final_price, payment_method, wallet_used, panel_delivery_mode, product_name_snapshot;
       `;
     } catch (e) {
       logError("receipt_submit_transaction_failed", e, { orderId });
@@ -5336,6 +5341,9 @@ async function parseAndApplyState(
     const fullName = [firstName, lastName].filter(Boolean).join(" ").trim() || "-";
     const actualWalletUsed = Number(rows[0].wallet_used || 0);
     const walletUsedText = actualWalletUsed > 0 ? `\nکسر از کیف پول: ${formatPriceToman(actualWalletUsed)} تومان` : "";
+    const cardDeliveryMode = parseDeliveryMode(String(rows[0].panel_delivery_mode || ""));
+    const cardDeliveryLabel = formatDeliveryModeLabel(cardDeliveryMode);
+    const cardProductSnap = String(rows[0].product_name_snapshot || "").trim();
     await clearState(userId);
     for (const adminId of adminIds) {
       try {
@@ -5345,6 +5353,8 @@ async function parseAndApplyState(
           caption:
             `رسید جدید ارسال شد\n` +
             `سفارش: ${rows[0].purchase_id}\n` +
+            `محصول: ${cardProductSnap || "-"}\n` +
+            `تحویل: ${cardDeliveryLabel}\n` +
             `کاربر: ${userId}\n` +
             `یوزرنیم: ${username}\n` +
             `نام: ${fullName}\n` +
@@ -5394,8 +5404,16 @@ async function parseAndApplyState(
     const firstName = profileRows.length && profileRows[0].first_name ? String(profileRows[0].first_name) : "";
     const lastName = profileRows.length && profileRows[0].last_name ? String(profileRows[0].last_name) : "";
     const fullName = [firstName, lastName].filter(Boolean).join(" ").trim() || "-";
-    const cfgRows = await sql`SELECT config_value FROM inventory WHERE id = ${rows[0].inventory_id} LIMIT 1;`;
+    const cfgRows = await sql`
+      SELECT i.config_value, p.name AS product_name, p.panel_delivery_mode
+      FROM inventory i
+      INNER JOIN products p ON p.id = i.product_id
+      WHERE i.id = ${rows[0].inventory_id}
+      LIMIT 1;
+    `;
     const cfgText = String(cfgRows[0]?.config_value || "-");
+    const topupProductName = String(cfgRows[0]?.product_name || "").trim();
+    const topupDeliveryLabel = formatDeliveryModeLabel(parseDeliveryMode(String(cfgRows[0]?.panel_delivery_mode || "")));
     await clearState(userId);
     for (const adminId of adminIds) {
       try {
@@ -5405,6 +5423,8 @@ async function parseAndApplyState(
           caption:
             `رسید جدید افزایش دیتا\n` +
             `شماره سفارش: ${rows[0].purchase_id}\n` +
+            `محصول: ${topupProductName || "-"}\n` +
+            `تحویل (سرویس پایه): ${topupDeliveryLabel}\n` +
             `کاربر: ${userId}\n` +
             `یوزرنیم: ${username}\n` +
             `نام: ${fullName}\n` +
