@@ -48,7 +48,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const panelRows = await sql`
-      SELECT id, panel_type, base_url, username, password
+      SELECT id, panel_type, base_url, username, password, subscription_public_port
       FROM panels
       WHERE id = ${panelId}
       LIMIT 1;
@@ -166,7 +166,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const panelConfig = (typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : (row.panel_config as Record<string, unknown>)) || {};
           const newConfigLinks = buildSanaeiConfigLinks(String(panel.base_url), regenRes.inbound as Record<string, unknown>, regenRes.client as Record<string, unknown>, panelConfig);
           const subId = String((regenRes.client as any).subId || "");
-          const newSubscriptionUrl = subId ? buildSanaeiSubscriptionUrl(String(panel.base_url), panelConfig, subId) : undefined;
+          const newSubscriptionUrl = subId ? buildSanaeiSubscriptionUrl(String(panel.base_url), panelConfig, subId, panel) : undefined;
           
           const newDelivery = { ...delivery };
           newDelivery.subscriptionUrl = newSubscriptionUrl;
