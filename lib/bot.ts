@@ -11804,19 +11804,26 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     });
     return;
   }
-  if (data.startsWith("admin_panel_toggle_")) {
-    const payload = data.replace("admin_panel_toggle_", "");
-    const firstUnderscore = payload.indexOf("_");
-    const panelId = Number(firstUnderscore >= 0 ? payload.slice(0, firstUnderscore) : "0");
-    const key = decodeURIComponent(firstUnderscore >= 0 ? payload.slice(firstUnderscore + 1) : "");
-    
+  // Toggle client on panel (admin_panel_toggle_{id}_{encodedKey}). Must run AFTER numeric
+  // admin_panel_toggle_{id}, admin_panel_toggle_move_, and admin_panel_toggle_sales_ — otherwise
+  // those callbacks are misparsed (panel id becomes 0 / key empty → «ورودی نامعتبر...»).
+  if (
+    data.startsWith("admin_panel_toggle_") &&
+    !data.startsWith("admin_panel_toggle_move_") &&
+    !data.startsWith("admin_panel_toggle_sales_") &&
+    !/^admin_panel_toggle_\d+$/.test(data)
+  ) {
+    const userToggleMatch = data.match(/^admin_panel_toggle_(\d+)_(.+)$/);
+    const panelId = userToggleMatch ? Number(userToggleMatch[1]) : NaN;
+    const key = userToggleMatch ? decodeURIComponent(userToggleMatch[2]) : "";
+
     const rows = await sql`
       SELECT id, panel_type, base_url, username, password
       FROM panels
       WHERE id = ${panelId}
       LIMIT 1;
     `;
-    if (!rows.length || !key) {
+    if (!userToggleMatch || !Number.isFinite(panelId) || panelId <= 0 || !rows.length || !key) {
       await tg("sendMessage", { chat_id: chatId, text: "ورودی نامعتبر برای تغییر وضعیت پنل." });
       return;
     }
