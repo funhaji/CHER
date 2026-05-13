@@ -467,6 +467,7 @@ export function ensureSchema() {
         await q`CREATE INDEX IF NOT EXISTS config_forensics_uuid_idx ON config_forensics(uuid);`;
         await q`CREATE INDEX IF NOT EXISTS config_forensics_panel_user_idx ON config_forensics(panel_user_key);`;
         await q`ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance INT NOT NULL DEFAULT 0;`;
+        await sql`ALTER TABLE panels ADD COLUMN IF NOT EXISTS subscription_public_port INT;`;
         await q`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_telegram_id BIGINT;`;
         await q`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_joined_at TIMESTAMPTZ;`;
         await q`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_qualified_at TIMESTAMPTZ;`;
