@@ -82,12 +82,11 @@ function postgresClientOptions(
       console.log(notice);
     }
   };
-  if (applicationSchema) {
-    base.connection = {
-      ...base.connection,
-      search_path: `${applicationSchema},public`
-    };
-  }
+  base.connection = {
+    ...base.connection,
+    ...(applicationSchema ? { search_path: `${applicationSchema},public` } : {}),
+    statement_timeout: 120000
+  };
   return base;
 }
 
@@ -105,12 +104,12 @@ export const sql: Sql = (
     : postgres(databaseUrl, postgresClientOptions(databaseUrl, resolvedSchema))
 ) as Sql;
 
-async function runDdl(statement: string): Promise<void> {
+async function execRaw(executor: unknown, statement: string): Promise<void> {
   if (useNeon) {
-    await (sql as unknown as (q: string, p?: readonly unknown[]) => Promise<unknown>)(statement, []);
+    await (executor as (q: string, p?: readonly unknown[]) => Promise<unknown>)(statement, []);
     return;
   }
-  await (sql as unknown as { unsafe: (q: string) => Promise<unknown> }).unsafe(statement);
+  await (executor as { unsafe: (q: string) => Promise<unknown> }).unsafe(statement);
 }
 
 let schemaReady: Promise<void> | null = null;
@@ -180,10 +179,11 @@ export async function resetBusinessDataPreserveCaches() {
 export function ensureSchema() {
   if (!schemaReady) {
     schemaReady = (async () => {
+      const run = async (q: Sql) => {
       if (resolvedSchema) {
-        await runDdl(`CREATE SCHEMA IF NOT EXISTS ${resolvedSchema}`);
+        await execRaw(q, `CREATE SCHEMA IF NOT EXISTS ${resolvedSchema}`);
       }
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS users (
           telegram_id BIGINT PRIMARY KEY,
           username TEXT,
@@ -193,7 +193,7 @@ export function ensureSchema() {
           last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS panels (
           id BIGSERIAL PRIMARY KEY,
           name TEXT NOT NULL UNIQUE,
@@ -213,7 +213,7 @@ export function ensureSchema() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS products (
           id SERIAL PRIMARY KEY,
           name TEXT NOT NULL UNIQUE,
@@ -229,7 +229,7 @@ export function ensureSchema() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS inventory (
           id BIGSERIAL PRIMARY KEY,
           product_id INT NOT NULL REFERENCES products(id),
@@ -246,7 +246,7 @@ export function ensureSchema() {
           sold_at TIMESTAMPTZ
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS discounts (
           id SERIAL PRIMARY KEY,
           code TEXT NOT NULL UNIQUE,
@@ -258,7 +258,7 @@ export function ensureSchema() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS orders (
           id BIGSERIAL PRIMARY KEY,
           purchase_id TEXT NOT NULL UNIQUE,
@@ -294,23 +294,23 @@ export function ensureSchema() {
           paid_at TIMESTAMPTZ
         );
       `;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS card_id BIGINT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS product_name_snapshot TEXT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS plisio_txn_id TEXT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS plisio_invoice_url TEXT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS plisio_status TEXT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_wallet_id BIGINT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_currency TEXT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_network TEXT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_address TEXT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_amount NUMERIC(18,6);`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_txid TEXT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_expires_at TIMESTAMPTZ;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS swapwallet_invoice_id TEXT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS swapwallet_payment_url TEXT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS swapwallet_status TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS card_id BIGINT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS product_name_snapshot TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS plisio_txn_id TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS plisio_invoice_url TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS plisio_status TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_wallet_id BIGINT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_currency TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_network TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_address TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_amount NUMERIC(18,6);`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_txid TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_expires_at TIMESTAMPTZ;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS swapwallet_invoice_id TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS swapwallet_payment_url TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS swapwallet_status TEXT;`;
 
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS crypto_wallets (
           id BIGSERIAL PRIMARY KEY,
           currency TEXT NOT NULL,
@@ -324,8 +324,8 @@ export function ensureSchema() {
           UNIQUE (currency, network)
         );
       `;
-      await sql`CREATE INDEX IF NOT EXISTS crypto_wallets_active_idx ON crypto_wallets(active);`;
-      await sql`
+      await q`CREATE INDEX IF NOT EXISTS crypto_wallets_active_idx ON crypto_wallets(active);`;
+      await q`
         INSERT INTO crypto_wallets (currency, network, active)
         VALUES
           ('TRX', 'TRON', FALSE),
@@ -333,14 +333,14 @@ export function ensureSchema() {
           ('USDT', 'TRC20', FALSE)
         ON CONFLICT (currency, network) DO NOTHING;
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS crypto_rate_cache (
           symbol TEXT PRIMARY KEY,
           toman_per_unit NUMERIC NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS topup_requests (
           id BIGSERIAL PRIMARY KEY,
           purchase_id TEXT UNIQUE,
@@ -357,19 +357,19 @@ export function ensureSchema() {
           done_by BIGINT
         );
       `;
-      await sql`ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS purchase_id TEXT;`;
-      await sql`ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'card2card';`;
-      await sql`ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS card_id BIGINT;`;
-      await sql`ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS final_price INT NOT NULL DEFAULT 0;`;
-      await sql`ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS receipt_file_id TEXT;`;
-      await sql`CREATE UNIQUE INDEX IF NOT EXISTS topup_requests_purchase_id_unique_idx ON topup_requests(purchase_id) WHERE purchase_id IS NOT NULL;`;
-      await sql`
+      await q`ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS purchase_id TEXT;`;
+      await q`ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'card2card';`;
+      await q`ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS card_id BIGINT;`;
+      await q`ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS final_price INT NOT NULL DEFAULT 0;`;
+      await q`ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS receipt_file_id TEXT;`;
+      await q`CREATE UNIQUE INDEX IF NOT EXISTS topup_requests_purchase_id_unique_idx ON topup_requests(purchase_id) WHERE purchase_id IS NOT NULL;`;
+      await q`
         CREATE TABLE IF NOT EXISTS settings (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS user_states (
           telegram_id BIGINT PRIMARY KEY,
           state TEXT NOT NULL,
@@ -377,14 +377,14 @@ export function ensureSchema() {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS payment_methods (
           code TEXT PRIMARY KEY,
           title TEXT NOT NULL,
           active BOOLEAN NOT NULL DEFAULT TRUE
         );
       `;
-      await sql`
+      await q`
         INSERT INTO payment_methods (code, title, active)
         VALUES
           ('card2card', 'کارت‌به‌کارت', TRUE),
@@ -395,7 +395,7 @@ export function ensureSchema() {
           ('swapwallet', 'SwapWallet', TRUE)
         ON CONFLICT (code) DO NOTHING;
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS cards (
           id BIGSERIAL PRIMARY KEY,
           label TEXT NOT NULL,
@@ -406,7 +406,7 @@ export function ensureSchema() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS banned_users (
           telegram_id BIGINT PRIMARY KEY,
           reason TEXT NOT NULL DEFAULT 'manual',
@@ -414,7 +414,7 @@ export function ensureSchema() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS panel_migrations (
           id BIGSERIAL PRIMARY KEY,
           source_inventory_id BIGINT NOT NULL REFERENCES inventory(id),
@@ -431,7 +431,7 @@ export function ensureSchema() {
           processed_by BIGINT
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS config_forensics (
           id BIGSERIAL PRIMARY KEY,
           inventory_id BIGINT REFERENCES inventory(id),
@@ -448,44 +448,44 @@ export function ensureSchema() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS is_infinite BOOLEAN NOT NULL DEFAULT FALSE;`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS sell_mode TEXT NOT NULL DEFAULT 'manual';`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS panel_id BIGINT;`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS panel_sell_limit INT;`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS panel_delivery_mode TEXT NOT NULL DEFAULT 'both';`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS panel_config JSONB NOT NULL DEFAULT '{}'::jsonb;`;
-      await sql`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS delivery_payload JSONB NOT NULL DEFAULT '{}'::jsonb;`;
-      await sql`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS panel_id BIGINT;`;
-      await sql`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS panel_user_key TEXT;`;
-      await sql`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS migration_parent_inventory_id BIGINT;`;
-      await sql`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS migrated_to_inventory_id BIGINT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS sell_mode TEXT NOT NULL DEFAULT 'manual';`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS source_panel_id BIGINT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS panel_delivery_mode TEXT NOT NULL DEFAULT 'both';`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS panel_config_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'tronado';`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS receipt_file_id TEXT;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS admin_decision_by BIGINT;`;
-      await sql`ALTER TABLE panels ADD COLUMN IF NOT EXISTS allow_new_sales BOOLEAN NOT NULL DEFAULT FALSE;`;
-      await sql`ALTER TABLE panels ADD COLUMN IF NOT EXISTS last_check_at TIMESTAMPTZ;`;
-      await sql`ALTER TABLE panels ADD COLUMN IF NOT EXISTS last_check_ok BOOLEAN;`;
-      await sql`ALTER TABLE panels ADD COLUMN IF NOT EXISTS last_check_message TEXT;`;
-      await sql`ALTER TABLE panels ADD COLUMN IF NOT EXISTS cached_meta JSONB NOT NULL DEFAULT '{}'::jsonb;`;
-      await sql`CREATE INDEX IF NOT EXISTS inventory_owner_status_idx ON inventory(owner_telegram_id, status);`;
-      await sql`CREATE INDEX IF NOT EXISTS inventory_product_status_idx ON inventory(product_id, status);`;
-      await sql`CREATE INDEX IF NOT EXISTS inventory_panel_user_key_idx ON inventory(panel_id, panel_user_key);`;
-      await sql`CREATE INDEX IF NOT EXISTS panel_migrations_status_idx ON panel_migrations(status, created_at DESC);`;
-      await sql`CREATE INDEX IF NOT EXISTS config_forensics_owner_idx ON config_forensics(owner_telegram_id, created_at DESC);`;
-      await sql`CREATE INDEX IF NOT EXISTS config_forensics_uuid_idx ON config_forensics(uuid);`;
-      await sql`CREATE INDEX IF NOT EXISTS config_forensics_panel_user_idx ON config_forensics(panel_user_key);`;
-      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance INT NOT NULL DEFAULT 0;`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet_used INT NOT NULL DEFAULT 0;`;
-      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_telegram_id BIGINT;`;
-      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_joined_at TIMESTAMPTZ;`;
-      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_qualified_at TIMESTAMPTZ;`;
-      await sql`CREATE INDEX IF NOT EXISTS users_referred_by_idx ON users(referred_by_telegram_id, referral_qualified_at DESC);`;
+      await q`ALTER TABLE products ADD COLUMN IF NOT EXISTS is_infinite BOOLEAN NOT NULL DEFAULT FALSE;`;
+      await q`ALTER TABLE products ADD COLUMN IF NOT EXISTS sell_mode TEXT NOT NULL DEFAULT 'manual';`;
+      await q`ALTER TABLE products ADD COLUMN IF NOT EXISTS panel_id BIGINT;`;
+      await q`ALTER TABLE products ADD COLUMN IF NOT EXISTS panel_sell_limit INT;`;
+      await q`ALTER TABLE products ADD COLUMN IF NOT EXISTS panel_delivery_mode TEXT NOT NULL DEFAULT 'both';`;
+      await q`ALTER TABLE products ADD COLUMN IF NOT EXISTS panel_config JSONB NOT NULL DEFAULT '{}'::jsonb;`;
+      await q`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS delivery_payload JSONB NOT NULL DEFAULT '{}'::jsonb;`;
+      await q`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS panel_id BIGINT;`;
+      await q`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS panel_user_key TEXT;`;
+      await q`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS migration_parent_inventory_id BIGINT;`;
+      await q`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS migrated_to_inventory_id BIGINT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS sell_mode TEXT NOT NULL DEFAULT 'manual';`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS source_panel_id BIGINT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS panel_delivery_mode TEXT NOT NULL DEFAULT 'both';`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS panel_config_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'tronado';`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS receipt_file_id TEXT;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS admin_decision_by BIGINT;`;
+      await q`ALTER TABLE panels ADD COLUMN IF NOT EXISTS allow_new_sales BOOLEAN NOT NULL DEFAULT FALSE;`;
+      await q`ALTER TABLE panels ADD COLUMN IF NOT EXISTS last_check_at TIMESTAMPTZ;`;
+      await q`ALTER TABLE panels ADD COLUMN IF NOT EXISTS last_check_ok BOOLEAN;`;
+      await q`ALTER TABLE panels ADD COLUMN IF NOT EXISTS last_check_message TEXT;`;
+      await q`ALTER TABLE panels ADD COLUMN IF NOT EXISTS cached_meta JSONB NOT NULL DEFAULT '{}'::jsonb;`;
+      await q`CREATE INDEX IF NOT EXISTS inventory_owner_status_idx ON inventory(owner_telegram_id, status);`;
+      await q`CREATE INDEX IF NOT EXISTS inventory_product_status_idx ON inventory(product_id, status);`;
+      await q`CREATE INDEX IF NOT EXISTS inventory_panel_user_key_idx ON inventory(panel_id, panel_user_key);`;
+      await q`CREATE INDEX IF NOT EXISTS panel_migrations_status_idx ON panel_migrations(status, created_at DESC);`;
+      await q`CREATE INDEX IF NOT EXISTS config_forensics_owner_idx ON config_forensics(owner_telegram_id, created_at DESC);`;
+      await q`CREATE INDEX IF NOT EXISTS config_forensics_uuid_idx ON config_forensics(uuid);`;
+      await q`CREATE INDEX IF NOT EXISTS config_forensics_panel_user_idx ON config_forensics(panel_user_key);`;
+      await q`ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance INT NOT NULL DEFAULT 0;`;
+      await q`ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet_used INT NOT NULL DEFAULT 0;`;
+      await q`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_telegram_id BIGINT;`;
+      await q`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_joined_at TIMESTAMPTZ;`;
+      await q`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_qualified_at TIMESTAMPTZ;`;
+      await q`CREATE INDEX IF NOT EXISTS users_referred_by_idx ON users(referred_by_telegram_id, referral_qualified_at DESC);`;
 
-      await sql`
+      await q`
         UPDATE inventory
         SET panel_user_key = COALESCE(
           delivery_payload->'metadata'->>'username',
@@ -503,7 +503,7 @@ export function ensureSchema() {
           ) IS NOT NULL;
       `;
       
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS wallet_transactions (
           id BIGSERIAL PRIMARY KEY,
           telegram_id BIGINT NOT NULL REFERENCES users(telegram_id),
@@ -513,9 +513,9 @@ export function ensureSchema() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`CREATE INDEX IF NOT EXISTS wallet_transactions_telegram_id_idx ON wallet_transactions(telegram_id, created_at DESC);`;
+      await q`CREATE INDEX IF NOT EXISTS wallet_transactions_telegram_id_idx ON wallet_transactions(telegram_id, created_at DESC);`;
       
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS wallet_topups (
           id BIGSERIAL PRIMARY KEY,
           telegram_id BIGINT NOT NULL REFERENCES users(telegram_id),
@@ -533,13 +533,13 @@ export function ensureSchema() {
           done_at TIMESTAMPTZ
         );
       `;
-      await sql`ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_network TEXT;`;
-      await sql`ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_address TEXT;`;
-      await sql`ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_amount NUMERIC(18,6);`;
-      await sql`ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_txid TEXT;`;
-      await sql`ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_expires_at TIMESTAMPTZ;`;
+      await q`ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_network TEXT;`;
+      await q`ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_address TEXT;`;
+      await q`ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_amount NUMERIC(18,6);`;
+      await q`ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_txid TEXT;`;
+      await q`ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_expires_at TIMESTAMPTZ;`;
 
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS referral_rewards (
           id BIGSERIAL PRIMARY KEY,
           inviter_telegram_id BIGINT NOT NULL REFERENCES users(telegram_id),
@@ -558,26 +558,26 @@ export function ensureSchema() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS reward_delivery_mode TEXT;`;
-      await sql`ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'granted';`;
-      await sql`ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS failure_reason TEXT;`;
-      await sql`ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`;
-      await sql`CREATE UNIQUE INDEX IF NOT EXISTS referral_rewards_inviter_batch_idx ON referral_rewards(inviter_telegram_id, reward_batch);`;
-      await sql`CREATE INDEX IF NOT EXISTS referral_rewards_inviter_created_idx ON referral_rewards(inviter_telegram_id, created_at DESC);`;
+      await q`ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS reward_delivery_mode TEXT;`;
+      await q`ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'granted';`;
+      await q`ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS failure_reason TEXT;`;
+      await q`ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`;
+      await q`CREATE UNIQUE INDEX IF NOT EXISTS referral_rewards_inviter_batch_idx ON referral_rewards(inviter_telegram_id, reward_batch);`;
+      await q`CREATE INDEX IF NOT EXISTS referral_rewards_inviter_created_idx ON referral_rewards(inviter_telegram_id, created_at DESC);`;
 
-      await sql`
+      await q`
         INSERT INTO payment_methods (code, title, active)
         VALUES ('tronado', 'TRON', TRUE), ('card2card', 'کارت‌به‌کارت', TRUE), ('tetrapay', 'تتراپی', TRUE), ('plisio', 'پلیسیو (کریپتو)', TRUE)
         ON CONFLICT (code) DO NOTHING;
       `;
-      await sql`UPDATE payment_methods SET title = 'پلیسیو (کریپتو)' WHERE code = 'plisio';`;
-      await sql`
+      await q`UPDATE payment_methods SET title = 'پلیسیو (کریپتو)' WHERE code = 'plisio';`;
+      await q`
         INSERT INTO payment_methods (code, title, active)
         VALUES ('crypto', 'کریپتو', TRUE)
         ON CONFLICT (code) DO NOTHING;
       `;
 
-      await sql`
+      await q`
         UPDATE products
         SET panel_config = jsonb_set(panel_config, '{data_limit_mb}', to_jsonb(size_mb), true)
         WHERE sell_mode = 'panel'
@@ -589,13 +589,13 @@ export function ensureSchema() {
           );
       `;
 
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS processed_updates (
           update_id BIGINT PRIMARY KEY,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`
+      await q`
         CREATE TABLE IF NOT EXISTS runtime_logs (
           id BIGSERIAL PRIMARY KEY,
           level TEXT NOT NULL,
@@ -604,14 +604,27 @@ export function ensureSchema() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
-      await sql`CREATE INDEX IF NOT EXISTS runtime_logs_created_idx ON runtime_logs(created_at DESC);`;
+      await q`CREATE INDEX IF NOT EXISTS runtime_logs_created_idx ON runtime_logs(created_at DESC);`;
       
-      await sql`
+      await q`
         DELETE FROM products p
         WHERE p.name IN ('1GB کانفیگ', '500MB کانفیگ')
           AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.product_id = p.id)
           AND NOT EXISTS (SELECT 1 FROM inventory i WHERE i.product_id = p.id);
       `;
+      };
+      if (!useNeon) {
+        await (sql as unknown as {
+          begin: (fn: (tx: Sql & { unsafe: (s: string) => Promise<unknown> }) => Promise<void>) => Promise<void>;
+        }).begin(async (tx) => {
+          await (tx as { unsafe: (s: string) => Promise<unknown> }).unsafe(
+            "SET LOCAL statement_timeout = '120s'"
+          );
+          await run(tx as Sql);
+        });
+      } else {
+        await run(sql);
+      }
     })();
   }
   return schemaReady;
