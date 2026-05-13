@@ -1,7 +1,106 @@
 import { neon } from "@neondatabase/serverless";
-import { databaseUrl } from "./env.js";
-export const sql = neon(databaseUrl);
+import postgres from "postgres";
+import { databaseDriver, databaseUrl } from "./env.js";
+function dbHostname(url) {
+    try {
+        const u = new URL(url.replace(/^postgres(ql)?:/i, "http:"));
+        return u.hostname.toLowerCase();
+    }
+    catch {
+        return "";
+    }
+}
+function useNeonServerless(url, driver) {
+    if (driver === "neon")
+        return true;
+    if (driver === "postgres")
+        return false;
+    const host = dbHostname(url);
+    return host.endsWith(".neon.tech") || host.includes(".neon.tech");
+}
+function postgresClientOptions(url) {
+    const host = dbHostname(url);
+    let port = "5432";
+    try {
+        const u = new URL(url.replace(/^postgres(ql)?:/i, "http:"));
+        if (u.port)
+            port = u.port;
+    }
+    catch {
+        // keep default
+    }
+    const transactionPooler = host.includes("pooler.supabase.com") || port === "6543";
+    return {
+        max: 1,
+        idle_timeout: 20,
+        connect_timeout: 30,
+        prepare: !transactionPooler
+    };
+}
+export const sql = (useNeonServerless(databaseUrl, databaseDriver)
+    ? neon(databaseUrl)
+    : postgres(databaseUrl, postgresClientOptions(databaseUrl)));
 let schemaReady = null;
+export async function seedReferenceData() {
+    await sql `
+    INSERT INTO crypto_wallets (currency, network, active)
+    VALUES
+      ('TRX', 'TRON', FALSE),
+      ('TON', 'TON', FALSE),
+      ('USDT', 'TRC20', FALSE)
+    ON CONFLICT (currency, network) DO NOTHING;
+  `;
+    await sql `
+    INSERT INTO payment_methods (code, title, active)
+    VALUES
+      ('card2card', 'کارت‌به‌کارت', TRUE),
+      ('tronado', 'ترونادو (TRX)', TRUE),
+      ('plisio', 'Plisio', TRUE),
+      ('tetrapay', 'تتراپی', TRUE),
+      ('crypto', 'کریپتو', TRUE),
+      ('swapwallet', 'SwapWallet', TRUE)
+    ON CONFLICT (code) DO NOTHING;
+  `;
+    await sql `
+    UPDATE payment_methods
+    SET title = CASE code
+      WHEN 'card2card' THEN 'کارت‌به‌کارت'
+      WHEN 'tronado' THEN 'ترونادو (TRX)'
+      WHEN 'plisio' THEN 'Plisio'
+      WHEN 'tetrapay' THEN 'تتراپی'
+      WHEN 'crypto' THEN 'کریپتو'
+      WHEN 'swapwallet' THEN 'SwapWallet'
+      ELSE title
+    END;
+  `;
+}
+export async function resetBusinessDataPreserveCaches() {
+    await ensureSchema();
+    await sql `
+    TRUNCATE TABLE
+      referral_rewards,
+      wallet_topups,
+      wallet_transactions,
+      topup_requests,
+      panel_migrations,
+      config_forensics,
+      banned_users,
+      user_states,
+      processed_updates,
+      orders,
+      inventory,
+      discounts,
+      cards,
+      products,
+      panels,
+      payment_methods,
+      crypto_wallets,
+      settings,
+      users
+    RESTART IDENTITY CASCADE;
+  `;
+    await seedReferenceData();
+}
 export function ensureSchema() {
     if (!schemaReady) {
         schemaReady = (async () => {
@@ -128,6 +227,9 @@ export function ensureSchema() {
             await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_amount NUMERIC(18,6);`;
             await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_txid TEXT;`;
             await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS crypto_expires_at TIMESTAMPTZ;`;
+            await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS swapwallet_invoice_id TEXT;`;
+            await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS swapwallet_payment_url TEXT;`;
+            await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS swapwallet_status TEXT;`;
             await sql `
         CREATE TABLE IF NOT EXISTS crypto_wallets (
           id BIGSERIAL PRIMARY KEY,
@@ -150,6 +252,13 @@ export function ensureSchema() {
           ('TON', 'TON', FALSE),
           ('USDT', 'TRC20', FALSE)
         ON CONFLICT (currency, network) DO NOTHING;
+      `;
+            await sql `
+        CREATE TABLE IF NOT EXISTS crypto_rate_cache (
+          symbol TEXT PRIMARY KEY,
+          toman_per_unit NUMERIC NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
       `;
             await sql `
         CREATE TABLE IF NOT EXISTS topup_requests (
@@ -194,6 +303,17 @@ export function ensureSchema() {
           title TEXT NOT NULL,
           active BOOLEAN NOT NULL DEFAULT TRUE
         );
+      `;
+            await sql `
+        INSERT INTO payment_methods (code, title, active)
+        VALUES
+          ('card2card', 'کارت‌به‌کارت', TRUE),
+          ('tronado', 'ترونادو (TRX)', TRUE),
+          ('plisio', 'Plisio', TRUE),
+          ('tetrapay', 'تتراپی', TRUE),
+          ('crypto', 'کریپتو', TRUE),
+          ('swapwallet', 'SwapWallet', TRUE)
+        ON CONFLICT (code) DO NOTHING;
       `;
             await sql `
         CREATE TABLE IF NOT EXISTS cards (
@@ -280,6 +400,10 @@ export function ensureSchema() {
             await sql `CREATE INDEX IF NOT EXISTS config_forensics_panel_user_idx ON config_forensics(panel_user_key);`;
             await sql `ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance INT NOT NULL DEFAULT 0;`;
             await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet_used INT NOT NULL DEFAULT 0;`;
+            await sql `ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_telegram_id BIGINT;`;
+            await sql `ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_joined_at TIMESTAMPTZ;`;
+            await sql `ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_qualified_at TIMESTAMPTZ;`;
+            await sql `CREATE INDEX IF NOT EXISTS users_referred_by_idx ON users(referred_by_telegram_id, referral_qualified_at DESC);`;
             await sql `
         UPDATE inventory
         SET panel_user_key = COALESCE(
@@ -332,6 +456,31 @@ export function ensureSchema() {
             await sql `ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_txid TEXT;`;
             await sql `ALTER TABLE wallet_topups ADD COLUMN IF NOT EXISTS crypto_expires_at TIMESTAMPTZ;`;
             await sql `
+        CREATE TABLE IF NOT EXISTS referral_rewards (
+          id BIGSERIAL PRIMARY KEY,
+          inviter_telegram_id BIGINT NOT NULL REFERENCES users(telegram_id),
+          reward_batch INT NOT NULL,
+          referred_count_snapshot INT NOT NULL DEFAULT 0,
+          threshold_snapshot INT NOT NULL DEFAULT 0,
+          reward_type TEXT NOT NULL,
+          reward_delivery_mode TEXT,
+          status TEXT NOT NULL DEFAULT 'granted',
+          wallet_amount INT NOT NULL DEFAULT 0,
+          product_id INT REFERENCES products(id),
+          order_id BIGINT REFERENCES orders(id),
+          description TEXT,
+          failure_reason TEXT,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `;
+            await sql `ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS reward_delivery_mode TEXT;`;
+            await sql `ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'granted';`;
+            await sql `ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS failure_reason TEXT;`;
+            await sql `ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`;
+            await sql `CREATE UNIQUE INDEX IF NOT EXISTS referral_rewards_inviter_batch_idx ON referral_rewards(inviter_telegram_id, reward_batch);`;
+            await sql `CREATE INDEX IF NOT EXISTS referral_rewards_inviter_created_idx ON referral_rewards(inviter_telegram_id, created_at DESC);`;
+            await sql `
         INSERT INTO payment_methods (code, title, active)
         VALUES ('tronado', 'TRON', TRUE), ('card2card', 'کارت‌به‌کارت', TRUE), ('tetrapay', 'تتراپی', TRUE), ('plisio', 'پلیسیو (کریپتو)', TRUE)
         ON CONFLICT (code) DO NOTHING;
@@ -359,6 +508,16 @@ export function ensureSchema() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
       `;
+            await sql `
+        CREATE TABLE IF NOT EXISTS runtime_logs (
+          id BIGSERIAL PRIMARY KEY,
+          level TEXT NOT NULL,
+          event TEXT NOT NULL,
+          payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `;
+            await sql `CREATE INDEX IF NOT EXISTS runtime_logs_created_idx ON runtime_logs(created_at DESC);`;
             await sql `
         DELETE FROM products p
         WHERE p.name IN ('1GB کانفیگ', '500MB کانفیگ')

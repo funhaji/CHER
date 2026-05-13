@@ -1,3 +1,4 @@
+import { sql } from "./db.js";
 function toErrorDetails(error) {
     if (error instanceof Error) {
         const withCause = error;
@@ -20,9 +21,14 @@ function write(level, event, data) {
     const line = JSON.stringify(payload);
     if (level === "ERROR") {
         console.error(line);
-        return;
     }
-    console.log(line);
+    else {
+        console.log(line);
+    }
+    sql `
+    INSERT INTO runtime_logs (level, event, payload)
+    VALUES (${level}, ${event}, ${JSON.stringify(payload)}::jsonb);
+  `.catch(() => { });
 }
 export function logInfo(event, data) {
     write("INFO", event, data);
