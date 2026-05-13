@@ -1204,12 +1204,22 @@ export function parseDeliveryPayload(raw: unknown): DeliveryPayload {
   };
 }
 
-function configSummaryLine(payload: DeliveryPayload) {
+function configSummaryLine(payload: DeliveryPayload, outboundHostHint?: string | null) {
   const configCount = payload.configLinks?.length || 0;
-  if (payload.subscriptionUrl && configCount) return `ساب + ${configCount} کانفیگ`;
-  if (payload.subscriptionUrl) return "فقط ساب";
-  if (configCount) return `${configCount} کانفیگ`;
-  return "نامشخص";
+  let base =
+    payload.subscriptionUrl && configCount
+      ? `ساب + ${configCount} کانفیگ`
+      : payload.subscriptionUrl
+        ? "فقط ساب"
+        : configCount
+          ? `${configCount} کانفیگ`
+          : "نامشخص";
+  const h = (outboundHostHint || "").trim();
+  if (h) {
+    const short = h.length > 24 ? `${h.slice(0, 22)}…` : h;
+    base = `${base} · @${short}`;
+  }
+  return base;
 }
 
 function getV2rayProductKindFromRow(row: Record<string, unknown>) {
@@ -3944,6 +3954,92 @@ export function buildSanaeiConfigLinks(
     links.push(`ss://${credentials}@${host}:${port}#${remark}`);
   }
   return links.filter(Boolean);
+}
+
+/** Bracket IPv6 for vless/trojan/ss authority section. */
+function formatHostForShareUri(hostname: string): string {
+  const h = hostname.trim();
+  if (!h) return h;
+  if (h.includes(":") && !h.startsWith("[")) return `[${h}]`;
+  return h;
+}
+
+/** Rewrite outbound host in a share link (vless / trojan / vmess / ss) without panel API. */
+function replaceShareLinkOutboundHost(link: string, newHost: string): string {
+  const nh = formatHostForShareUri(newHost);
+  if (!nh) return link;
+  const s = link.trim();
+  if (s.startsWith("vless://") || s.startsWith("trojan://")) {
+    const scheme = s.startsWith("vless://") ? "vless://" : "trojan://";
+    const rest = s.slice(scheme.length);
+    const at = rest.indexOf("@");
+    if (at < 0) return link;
+    const cred = rest.slice(0, at);
+    const tail = rest.slice(at + 1);
+    let port = "";
+    let suffix = "";
+    if (tail.startsWith("[")) {
+      const bi = tail.indexOf("]");
+      if (bi < 0) return link;
+      const after = tail.slice(bi + 1);
+      const pm = after.match(/^(:[0-9]+)?(\?[^#]*)?(#.*)?$/);
+      port = pm?.[1] || "";
+      suffix = `${pm?.[2] || ""}${pm?.[3] || ""}`;
+    } else {
+      const m = tail.match(/^([^:\\/?#]+)(:\\d+)?(\\?[^#]*)?(#.*)?$/);
+      if (!m) return link;
+      port = m[2] || "";
+      suffix = `${m[3] || ""}${m[4] || ""}`;
+    }
+    return `${scheme}${cred}@${nh}${port}${suffix}`;
+  }
+  if (s.startsWith("vmess://")) {
+    try {
+      const buf = Buffer.from(s.slice(8), "base64");
+      const j = JSON.parse(buf.toString("utf8")) as Record<string, unknown>;
+      if (j && typeof j === "object") {
+        j.add = newHost;
+        return `vmess://${Buffer.from(JSON.stringify(j), "utf8").toString("base64")}`;
+      }
+    } catch {
+      return link;
+    }
+  }
+  if (s.startsWith("ss://")) {
+    const body = s.slice(5);
+    const at = body.lastIndexOf("@");
+    if (at < 0) return link;
+    const cred = body.slice(0, at);
+    const tail = body.slice(at + 1);
+    const m = tail.match(/^([^:\/?#]+)(:\d+)?(\?[^#]*)?(#.*)?$/);
+    if (!m) return link;
+    return `ss://${cred}@${nh}${m[2] || ""}${m[3] || ""}${m[4] || ""}`;
+  }
+  return link;
+}
+
+/** Recompute subscription + direct links from stored delivery + current panel row (list / labels). */
+function applyLiveSanaeiPanelOverridesToDeliveryPayload(
+  payload: DeliveryPayload,
+  panelRow: Record<string, unknown>,
+  productPanelConfig: Record<string, unknown>
+): { payload: DeliveryPayload; outboundHost: string } {
+  const baseUrl = String(panelRow.base_url || "");
+  const merged = mergeSanaeiPanelRowIntoClientConfig(sanitizePanelConfig(productPanelConfig), panelRow);
+  const host = extractSanaeiHost(baseUrl, merged, {});
+  const subId = String(payload.metadata?.subId || "").trim();
+  const subscriptionUrl = subId ? buildSanaeiSubscriptionUrl(baseUrl, merged, subId, panelRow) : payload.subscriptionUrl;
+  const configLinks = (payload.configLinks || []).map((l) => replaceShareLinkOutboundHost(l, host));
+  return {
+    outboundHost: host,
+    payload: {
+      ...payload,
+      subscriptionUrl: subscriptionUrl || payload.subscriptionUrl,
+      configLinks,
+      primaryQr: buildQrText(payload.primaryText, configLinks, subscriptionUrl || payload.subscriptionUrl),
+      primaryText: payload.primaryText
+    }
+  };
 }
 
 async function provisionMarzbanSale(
@@ -10109,7 +10205,7 @@ async function createOrder(
 
 async function showMyConfigs(chatId: number, userId: number, forTopupFlow: boolean) {
   const rows = await sql`
-    SELECT i.id, i.config_value, i.delivery_payload, p.name, o.purchase_id
+    SELECT i.id, i.config_value, i.delivery_payload, i.panel_id, p.panel_config, p.name, o.purchase_id
     FROM inventory i
     INNER JOIN products p ON p.id = i.product_id
     LEFT JOIN orders o ON o.id = i.sold_order_id
@@ -10121,6 +10217,12 @@ async function showMyConfigs(chatId: number, userId: number, forTopupFlow: boole
     await tg("sendMessage", { chat_id: chatId, text: "شما هنوز کانفیگی خریداری نکرده‌اید." });
     return;
   }
+  const panelIds = [...new Set(rows.map((r) => Number(r.panel_id || 0)).filter((n) => n > 0))];
+  const panelById = new Map<number, Record<string, unknown>>();
+  for (const pid of panelIds) {
+    const p = await getPanelById(pid);
+    if (p) panelById.set(pid, p as Record<string, unknown>);
+  }
   const keyboard = rows.map((row) => [
     {
       text: (() => {
@@ -10128,7 +10230,23 @@ async function showMyConfigs(chatId: number, userId: number, forTopupFlow: boole
         const label = payload.metadata?.label ? String(payload.metadata.label) : "";
         const revoked = payload.metadata?.revoked === true;
         const title = label ? `${label} (${row.name})` : String(row.name);
-        return `🔹 ${title}${revoked ? " 🚫" : ""} | سفارش ${row.purchase_id || "#-"} | ${configSummaryLine(payload)}`;
+        const isPanel = Boolean(payload.metadata?.panelType) && String(payload.metadata?.panelType || "") !== "manual";
+        const pt = String(payload.metadata?.panelType || "");
+        const pid = Number(row.panel_id || 0);
+        const productCfg =
+          (typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : (row.panel_config as Record<string, unknown>)) ||
+          {};
+        let hostHint: string | null = null;
+        let summaryPayload = payload;
+        if (isPanel && pt === "sanaei" && pid > 0) {
+          const pRow = panelById.get(pid);
+          if (pRow) {
+            const { payload: live, outboundHost } = applyLiveSanaeiPanelOverridesToDeliveryPayload(payload, pRow, productCfg);
+            summaryPayload = live;
+            hostHint = outboundHost;
+          }
+        }
+        return `🔹 ${title}${revoked ? " 🚫" : ""} | سفارش ${row.purchase_id || "#-"} | ${configSummaryLine(summaryPayload, hostHint)}`;
       })(),
       callback_data: `open_config_${row.id}${forTopupFlow ? "_t" : ""}`
     }
@@ -10234,16 +10352,28 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
           return;
         }
         if (panelType === "sanaei" && foundOnPanel && panelSubLink) {
-          const primaryText =
-            delivery.subscriptionUrl && delivery.primaryText === delivery.subscriptionUrl
-              ? panelSubLink
-              : delivery.primaryText;
+          const panelConfig =
+            typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : (row.panel_config as Record<string, unknown>);
+          const { payload: live } = applyLiveSanaeiPanelOverridesToDeliveryPayload(
+            delivery,
+            panel as Record<string, unknown>,
+            (panelConfig || {}) as Record<string, unknown>
+          );
+          let primaryText = delivery.primaryText;
+          if (delivery.subscriptionUrl && primaryText === delivery.subscriptionUrl) {
+            primaryText = String(live.subscriptionUrl || primaryText);
+          } else if ((delivery.configLinks || [])[0] && primaryText === (delivery.configLinks || [])[0]) {
+            primaryText = String((live.configLinks || [])[0] || primaryText);
+          }
           displayDelivery = {
-            ...delivery,
-            subscriptionUrl: panelSubLink,
-            primaryQr: buildQrText(delivery.primaryText, delivery.configLinks || [], panelSubLink),
-            primaryText: primaryText || delivery.primaryText
+            ...live,
+            primaryText: primaryText || live.primaryText || delivery.primaryText
           };
+          displayDelivery.primaryQr = buildQrText(
+            displayDelivery.primaryText,
+            displayDelivery.configLinks || [],
+            displayDelivery.subscriptionUrl
+          );
         }
       }
     }
