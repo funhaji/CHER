@@ -1618,6 +1618,9 @@ async function getPanelById(panelId: number) {
       username,
       password,
       subscription_public_port,
+      subscription_public_host,
+      subscription_link_protocol,
+      config_public_host,
       active,
       allow_customer_migration,
       allow_new_sales,
@@ -2514,7 +2517,13 @@ async function showPanelDetails(chatId: number, panelId: number, notice?: string
             panel.subscription_public_port != null && Number(panel.subscription_public_port) > 0
               ? Number(panel.subscription_public_port)
               : "همان پورت آدرس پنل"
-          }\n`
+          }\n` +
+          `دامنه لینک ساب: ${String(panel.subscription_public_host || "").trim() || "همان نام میزبان آدرس پنل"}\n` +
+          `پروتکل لینک ساب: ${(() => {
+            const p = String(panel.subscription_link_protocol || "").trim().toLowerCase();
+            return p === "http" || p === "https" ? p : "همان پروتکل آدرس پنل";
+          })()}\n` +
+          `دامنه نمایش در کانفیگ: ${String(panel.config_public_host || "").trim() || "همان تشخیص خودکار (محصول/پنل)"}\n`
         : "") +
       `یوزرنیم: ${panel.username || "-"}\n` +
       `وضعیت: ${panel.active ? "فعال" : "غیرفعال"}\n` +
@@ -2532,7 +2541,13 @@ async function showPanelDetails(chatId: number, panelId: number, notice?: string
           cb("🧪 تست", `admin_panel_test_${panel.id}`, "primary")
         ],
         ...(String(panel.panel_type) === "sanaei"
-          ? [[cb("🔢 پورت ساب", `admin_panel_set_subport_${panel.id}`, "primary")]]
+          ? [
+              [
+                cb("🔢 پورت ساب", `admin_panel_set_subport_${panel.id}`, "primary"),
+                cb("🔗 دامنه/پروتکل ساب", `admin_panel_set_suburl_${panel.id}`, "primary")
+              ],
+              [cb("🌐 دامنه کانفیگ", `admin_panel_set_confighost_${panel.id}`, "primary")]
+            ]
           : []),
         [
           cb(panel.active ? "⛔ غیرفعال" : "✅ فعال", `admin_panel_toggle_${panel.id}`, panel.active ? "danger" : "success"),
@@ -3343,6 +3358,8 @@ type PanelLookupHit = {
   panelBaseUrl: string;
   panelType: "marzban" | "sanaei";
   subscriptionPublicPort: number | null;
+  subscriptionPublicHost: string | null;
+  subscriptionLinkProtocol: string | null;
   ownerTelegramId: number | null;
   panelUserKey: string;
   panelUser: Record<string, unknown>;
@@ -3388,7 +3405,7 @@ async function performRegenLink(
   }
   
   const panelRows = await sql`
-    SELECT id, panel_type, base_url, username, password, subscription_public_port
+    SELECT id, panel_type, base_url, username, password, subscription_public_port, subscription_public_host, subscription_link_protocol, config_public_host
     FROM panels
     WHERE id = ${panelId}
     LIMIT 1;
@@ -3421,7 +3438,13 @@ async function performRegenLink(
       regenMessage = "تغییر لینک با موفقیت انجام شد ✅";
       newUuid = String((result.client as any).id || "");
       const panelConfig = (typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : (row.panel_config as Record<string, unknown>)) || {};
-      newConfigLinks = buildSanaeiConfigLinks(String(panelRows[0].base_url), result.inbound as Record<string, unknown>, result.client as Record<string, unknown>, panelConfig);
+      const mergedCfg = mergeSanaeiPanelRowIntoClientConfig(panelConfig, panelRows[0] as Record<string, unknown>);
+      newConfigLinks = buildSanaeiConfigLinks(
+        String(panelRows[0].base_url),
+        result.inbound as Record<string, unknown>,
+        result.client as Record<string, unknown>,
+        mergedCfg
+      );
       const subId = String((result.client as Record<string, unknown>).subId || "");
       newSubscriptionUrl = subId
         ? buildSanaeiSubscriptionUrl(String(panelRows[0].base_url), panelConfig, subId, panelRows[0] as Record<string, unknown>)
@@ -3481,7 +3504,7 @@ async function lookupIdentifierInPanels(raw: string): Promise<PanelLookupHit | P
   const identifier = raw.trim();
   if (!identifier) return { ok: false, message: "empty_identifier" };
   const panels = await sql`
-    SELECT id, name, panel_type, base_url, username, password, active, subscription_public_port
+    SELECT id, name, panel_type, base_url, username, password, active, subscription_public_port, subscription_public_host, subscription_link_protocol, config_public_host
     FROM panels
     WHERE active = TRUE
     ORDER BY priority DESC, id ASC;
@@ -3501,6 +3524,8 @@ async function lookupIdentifierInPanels(raw: string): Promise<PanelLookupHit | P
           panelBaseUrl: String(panel.base_url || ""),
           panelType: "marzban",
           subscriptionPublicPort: null,
+          subscriptionPublicHost: null,
+          subscriptionLinkProtocol: null,
           ownerTelegramId: ownerTg,
           panelUserKey: String((found.user as Record<string, unknown>).username || identifier),
           panelUser: found.user
@@ -3513,6 +3538,9 @@ async function lookupIdentifierInPanels(raw: string): Promise<PanelLookupHit | P
         const ownerTg = parsePanelUserTelegramId(client.tgId || client.email || "");
         const panelUserKey = String(client.id || client.subId || client.email || identifier);
         const subPort = parseMaybeNumber(panel.subscription_public_port);
+        const subHost = sanitizeSubscriptionPublicHostInput(String(panel.subscription_public_host || ""));
+        const subProtoRaw = String(panel.subscription_link_protocol || "").trim().toLowerCase();
+        const subProto = subProtoRaw === "http" || subProtoRaw === "https" ? subProtoRaw : null;
         return {
           ok: true,
           source: "panel",
@@ -3521,6 +3549,8 @@ async function lookupIdentifierInPanels(raw: string): Promise<PanelLookupHit | P
           panelBaseUrl: String(panel.base_url || ""),
           panelType: "sanaei",
           subscriptionPublicPort: subPort !== null && subPort > 0 ? subPort : null,
+          subscriptionPublicHost: subHost || null,
+          subscriptionLinkProtocol: subProto,
           ownerTelegramId: ownerTg,
           panelUserKey,
           panelUser: client,
@@ -3730,6 +3760,47 @@ function resolveSanaeiSubscriptionPublicPort(panelConfig: Record<string, unknown
   return null;
 }
 
+/** Hostname for public subscription URL or for @host in vless/vmess links (panel-level override). */
+function sanitizeSubscriptionPublicHostInput(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  let candidate = trimmed;
+  if (/^https?:\/\//i.test(candidate)) {
+    try {
+      return new URL(candidate).hostname || null;
+    } catch {
+      return null;
+    }
+  }
+  candidate = candidate.split("/")[0].trim();
+  if (candidate.includes(":") && !candidate.startsWith("[")) {
+    candidate = candidate.split(":")[0].trim();
+  }
+  if (!candidate) return null;
+  try {
+    return new URL(`https://${candidate}`).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveSanaeiSubscriptionLinkProtocol(panelRow?: Record<string, unknown> | null): "http" | "https" | null {
+  if (!panelRow) return null;
+  const p = String(panelRow.subscription_link_protocol || "").trim().toLowerCase();
+  return p === "http" || p === "https" ? p : null;
+}
+
+/** Merge panel row `config_public_host` into product panel_config so buildSanaeiConfigLinks uses it as server_host. */
+export function mergeSanaeiPanelRowIntoClientConfig(
+  panelConfig: Record<string, unknown>,
+  panelRow?: Record<string, unknown> | null
+): Record<string, unknown> {
+  if (!panelRow) return panelConfig;
+  const host = sanitizeSubscriptionPublicHostInput(String(panelRow.config_public_host || ""));
+  if (!host) return panelConfig;
+  return { ...panelConfig, server_host: host };
+}
+
 /** Subscription URL for 3x-ui; optional panel row supplies subscription_public_port when it differs from panel UI port. */
 export function buildSanaeiSubscriptionUrl(
   baseUrl: string,
@@ -3739,16 +3810,18 @@ export function buildSanaeiSubscriptionUrl(
 ) {
   const customPath = String(panelConfig.subscription_path || panelConfig.sub_path || "sub").replace(/^\/+|\/+$/g, "");
   const portOverride = resolveSanaeiSubscriptionPublicPort(panelConfig, panelRow);
+  const hostOverride = panelRow ? sanitizeSubscriptionPublicHostInput(String(panelRow.subscription_public_host || "")) : null;
+  const protocolOverride = resolveSanaeiSubscriptionLinkProtocol(panelRow);
   let root = normalizeBaseUrl(baseUrl);
-  if (portOverride !== null) {
-    try {
-      const u = new URL(root);
-      u.port = String(portOverride);
-      const path = u.pathname.replace(/\/+$/, "");
-      root = `${u.origin}${path === "/" ? "" : path}`;
-    } catch {
-      /* keep root */
-    }
+  try {
+    const u = new URL(root);
+    if (portOverride !== null) u.port = String(portOverride);
+    if (hostOverride) u.hostname = hostOverride;
+    if (protocolOverride) u.protocol = `${protocolOverride}:`;
+    const path = u.pathname.replace(/\/+$/, "");
+    root = `${u.origin}${path === "/" ? "" : path}`;
+  } catch {
+    /* keep root */
   }
   return `${root}/${customPath}/${encodeURIComponent(subId)}`;
 }
@@ -3757,7 +3830,6 @@ function sanaeiSubscriptionUrlsMatchSubId(storedUrl: string, canonicalUrl: strin
   try {
     const ua = new URL(storedUrl.trim());
     const ub = new URL(canonicalUrl.trim());
-    if (ua.hostname !== ub.hostname) return false;
     const sa = ua.pathname.split("/").filter(Boolean);
     const sb = ub.pathname.split("/").filter(Boolean);
     if (!sa.length || !sb.length) return false;
@@ -4044,7 +4116,8 @@ async function provisionSanaeiSale(
   if (!ok) {
     throw new Error(`Sanaei create client failed: ${res.status} ${responseSnippet(raw)}`);
   }
-  const configLinks = buildSanaeiConfigLinks(String(panel.base_url), inbound, toJsonObject(client) || {}, panelConfig);
+  const mergedClientCfg = mergeSanaeiPanelRowIntoClientConfig(panelConfig, panel);
+  const configLinks = buildSanaeiConfigLinks(String(panel.base_url), inbound, toJsonObject(client) || {}, mergedClientCfg);
   const subscriptionUrl = buildSanaeiSubscriptionUrl(String(panel.base_url), panelConfig, subId, panel);
   
   const deliveryMode = String(order.panel_delivery_mode || "both");
@@ -6962,7 +7035,9 @@ async function parseAndApplyState(
       String(panelUser.subscription_url || panelUser.subscriptionUrl || "").trim() ||
       (String(panelMatch.panelType || "") === "sanaei" && panelUser.subId && panelMatch.panelBaseUrl
         ? buildSanaeiSubscriptionUrl(String(panelMatch.panelBaseUrl), {}, String(panelUser.subId), {
-            subscription_public_port: panelMatch.subscriptionPublicPort ?? undefined
+            subscription_public_port: panelMatch.subscriptionPublicPort ?? undefined,
+            subscription_public_host: panelMatch.subscriptionPublicHost ?? undefined,
+            subscription_link_protocol: panelMatch.subscriptionLinkProtocol ?? undefined
           })
         : "");
     const panelRuntimeLine =
@@ -7536,7 +7611,7 @@ async function parseAndApplyState(
         return true;
       }
       const panelRows = await sql`
-        SELECT id, panel_type, base_url, username, password
+        SELECT id, panel_type, base_url, username, password, subscription_public_port, subscription_public_host, subscription_link_protocol, config_public_host
         FROM panels
         WHERE id = ${panelId}
         LIMIT 1;
@@ -10367,7 +10442,7 @@ async function finalizeOrder(orderId: number, decidedBy: number | null) {
 
   if (parseSellMode(String(order.sell_mode || "")) === "panel") {
     const panelRows = await sql`
-      SELECT id, panel_type, base_url, username, password, active, allow_new_sales
+      SELECT id, panel_type, base_url, username, password, active, allow_new_sales, subscription_public_port, subscription_public_host, subscription_link_protocol, config_public_host
       FROM panels
       WHERE id = ${order.source_panel_id}
       LIMIT 1;
