@@ -7842,6 +7842,75 @@ async function parseAndApplyState(
     await showPanelDetails(chatId, panelId, "پورت لینک ساب ذخیره شد ✅");
     return true;
   }
+  if (state.state === "admin_panel_suburl_host_edit") {
+    const panelId = Number(state.payload.panelId || 0);
+    if (!Number.isFinite(panelId) || panelId <= 0) {
+      await clearState(userId);
+      await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+      return true;
+    }
+    const raw = text.trim();
+    if (raw === "-") {
+      await clearState(userId);
+      await showPanelDetails(chatId, panelId, "تنظیم دامنه لینک ساب لغو شد.");
+      return true;
+    }
+    const protoRaw = state.payload.subscriptionLinkProtocol;
+    const protocolSql = protoRaw === "http" || protoRaw === "https" ? String(protoRaw) : null;
+    const lt = raw.toLowerCase();
+    let subscriptionPublicHost: string | null = null;
+    if (lt !== "0" && lt !== "auto") {
+      const h = sanitizeSubscriptionPublicHostInput(raw);
+      if (!h) {
+        await tg("sendMessage", {
+          chat_id: chatId,
+          text: "نام میزبان معتبر نیست. مثال: sub.example.com\nیا https://sub.example.com\n0 یا auto = همان میزبان آدرس پنل"
+        });
+        return true;
+      }
+      subscriptionPublicHost = h;
+    }
+    await sql`
+      UPDATE panels
+      SET subscription_public_host = ${subscriptionPublicHost},
+          subscription_link_protocol = ${protocolSql}
+      WHERE id = ${panelId}
+    `;
+    await clearState(userId);
+    await showPanelDetails(chatId, panelId, "دامنه و پروتکل لینک ساب ذخیره شد ✅");
+    return true;
+  }
+  if (state.state === "admin_panel_confighost_edit") {
+    const panelId = Number(state.payload.panelId || 0);
+    if (!Number.isFinite(panelId) || panelId <= 0) {
+      await clearState(userId);
+      await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+      return true;
+    }
+    const raw = text.trim();
+    if (raw === "-") {
+      await clearState(userId);
+      await showPanelDetails(chatId, panelId, "تنظیم دامنه کانفیگ لغو شد.");
+      return true;
+    }
+    const lt = raw.toLowerCase();
+    if (lt === "0" || lt === "auto") {
+      await sql`UPDATE panels SET config_public_host = NULL WHERE id = ${panelId}`;
+    } else {
+      const h = sanitizeSubscriptionPublicHostInput(raw);
+      if (!h) {
+        await tg("sendMessage", {
+          chat_id: chatId,
+          text: "نام میزبان معتبر نیست. مثال: v-panel.example.com\n0 یا auto = تشخیص خودکار\n- = انصراف"
+        });
+        return true;
+      }
+      await sql`UPDATE panels SET config_public_host = ${h} WHERE id = ${panelId}`;
+    }
+    await clearState(userId);
+    await showPanelDetails(chatId, panelId, "دامنه نمایش در کانفیگ ذخیره شد ✅");
+    return true;
+  }
   if (state.state === "admin_panel_wizard") {
     const mode = String(state.payload.mode || "add") as PanelWizardMode;
     const step = String(state.payload.step || "name") as PanelWizardStep;
@@ -7927,7 +7996,10 @@ async function parseAndApplyState(
                 base_url = EXCLUDED.base_url,
                 username = EXCLUDED.username,
                 password = EXCLUDED.password,
-                subscription_public_port = panels.subscription_public_port;
+                subscription_public_port = panels.subscription_public_port,
+                subscription_public_host = panels.subscription_public_host,
+                subscription_link_protocol = panels.subscription_link_protocol,
+                config_public_host = panels.config_public_host;
           `;
           const idRows = await sql`SELECT id FROM panels WHERE name = ${name} LIMIT 1;`;
           await clearState(userId);
@@ -8008,7 +8080,10 @@ async function parseAndApplyState(
                 base_url = EXCLUDED.base_url,
                 username = EXCLUDED.username,
                 password = EXCLUDED.password,
-                subscription_public_port = EXCLUDED.subscription_public_port;
+                subscription_public_port = EXCLUDED.subscription_public_port,
+                subscription_public_host = panels.subscription_public_host,
+                subscription_link_protocol = panels.subscription_link_protocol,
+                config_public_host = panels.config_public_host;
           `;
           const idRows = await sql`SELECT id FROM panels WHERE name = ${name} LIMIT 1;`;
           await clearState(userId);
@@ -12203,7 +12278,7 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     const panelId = Number(firstUnderscore >= 0 ? payload.slice(0, firstUnderscore) : "0");
     const key = decodeURIComponent(firstUnderscore >= 0 ? payload.slice(firstUnderscore + 1) : "");
     const rows = await sql`
-      SELECT id, panel_type, base_url, username, password, subscription_public_port
+      SELECT id, panel_type, base_url, username, password, subscription_public_port, subscription_public_host, subscription_link_protocol, config_public_host
       FROM panels
       WHERE id = ${panelId}
       LIMIT 1;
@@ -12234,7 +12309,8 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
         LIMIT 1;
       `;
       const panelConfig = panelConfigRows.length ? (typeof panelConfigRows[0].panel_config === "string" ? parseJsonObject(panelConfigRows[0].panel_config) : (panelConfigRows[0].panel_config as Record<string, unknown>)) || {} : {};
-      const newConfigLinks = buildSanaeiConfigLinks(String(rows[0].base_url), (result as any).inbound as Record<string, unknown>, (result as any).client as Record<string, unknown>, panelConfig);
+      const mergedCfg = mergeSanaeiPanelRowIntoClientConfig(panelConfig, rows[0] as Record<string, unknown>);
+      const newConfigLinks = buildSanaeiConfigLinks(String(rows[0].base_url), (result as any).inbound as Record<string, unknown>, (result as any).client as Record<string, unknown>, mergedCfg);
       const subId = String((result as any).client?.subId || "");
       const subUrl = subId ? buildSanaeiSubscriptionUrl(String(rows[0].base_url), panelConfig, subId, rows[0] as Record<string, unknown>) : "";
       newLinkMsg = subUrl || newConfigLinks[0] || "";
@@ -12357,6 +12433,85 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
       text:
         `🔢 پورت عمومی لینک سابسکریپشن\nپنل: ${panel.name}\nفعلی: ${cur}\n\n` +
         `عدد ۱–۶۵۵۳۵ بفرستید (مثلاً 8080).\n0 یا auto = همان پورت آدرس پنل\n- = انصراف`,
+      reply_markup: { inline_keyboard: [[{ text: "❌ انصراف", callback_data: `admin_panel_open_${panelId}` }]] }
+    });
+    return;
+  }
+  if (data.startsWith("admin_panel_set_suburl_")) {
+    const panelId = Number(data.replace("admin_panel_set_suburl_", ""));
+    if (!Number.isFinite(panelId) || panelId <= 0) {
+      await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+      return;
+    }
+    const panel = await getPanelById(panelId);
+    if (!panel || String(panel.panel_type) !== "sanaei") {
+      await tg("sendMessage", { chat_id: chatId, text: "این گزینه فقط برای پنل Sanaei / 3x-ui است." });
+      return;
+    }
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text:
+        `🔗 دامنه و پروتکل لینک سابسکریپشن\nپنل: ${panel.name}\n\n` +
+        `۱) پروتکل را انتخاب کنید.\n` +
+        `۲) سپس فقط نام میزبان را بفرستید (مثال: sub.example.com).\n\n` +
+        `در مرحلهٔ دوم: 0 یا auto = همان hostname آدرس پنل\n- = انصراف`,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "HTTPS", callback_data: `admin_panel_suburl_proto_${panelId}_https` },
+            { text: "HTTP", callback_data: `admin_panel_suburl_proto_${panelId}_http` }
+          ],
+          [{ text: "همان پروتکل آدرس پنل", callback_data: `admin_panel_suburl_proto_${panelId}_def` }],
+          [{ text: "❌ انصراف", callback_data: `admin_panel_open_${panelId}` }]
+        ]
+      }
+    });
+    return;
+  }
+  const suburlProtoMatch = data.match(/^admin_panel_suburl_proto_(\d+)_(https|http|def)$/);
+  if (suburlProtoMatch) {
+    const panelId = Number(suburlProtoMatch[1]);
+    const protoKey = suburlProtoMatch[2];
+    if (!Number.isFinite(panelId) || panelId <= 0) {
+      await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+      return;
+    }
+    const panel = await getPanelById(panelId);
+    if (!panel || String(panel.panel_type) !== "sanaei") {
+      await tg("sendMessage", { chat_id: chatId, text: "این گزینه فقط برای پنل Sanaei / 3x-ui است." });
+      return;
+    }
+    const subscriptionLinkProtocol = protoKey === "def" ? null : protoKey;
+    await setState(userId, "admin_panel_suburl_host_edit", { panelId, subscriptionLinkProtocol });
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text:
+        `نام میزبان لینک ساب را بفرستید (بدون https://).\n` +
+        `پروتکل انتخاب‌شده: ${protoKey === "def" ? "همان آدرس پنل" : protoKey.toUpperCase()}\n\n` +
+        `0 یا auto = همان hostname آدرس پنل\n- = انصراف`,
+      reply_markup: { inline_keyboard: [[{ text: "❌ انصراف", callback_data: `admin_panel_open_${panelId}` }]] }
+    });
+    return;
+  }
+  if (data.startsWith("admin_panel_set_confighost_")) {
+    const panelId = Number(data.replace("admin_panel_set_confighost_", ""));
+    if (!Number.isFinite(panelId) || panelId <= 0) {
+      await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+      return;
+    }
+    const panel = await getPanelById(panelId);
+    if (!panel || String(panel.panel_type) !== "sanaei") {
+      await tg("sendMessage", { chat_id: chatId, text: "این گزینه فقط برای پنل Sanaei / 3x-ui است." });
+      return;
+    }
+    const cur = String(panel.config_public_host || "").trim() || "تشخیص خودکار (محصول/پنل)";
+    await setState(userId, "admin_panel_confighost_edit", { panelId });
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text:
+        `🌐 دامنهٔ نمایش در لینک کانفیگ (vless/vmess/…)\nپنل: ${panel.name}\nفعلی: ${cur}\n\n` +
+        `فقط نام میزبان بفرستید (مثال: v-panel.example.com)\n` +
+        `0 یا auto = تشخیص خودکار\n- = انصراف`,
       reply_markup: { inline_keyboard: [[{ text: "❌ انصراف", callback_data: `admin_panel_open_${panelId}` }]] }
     });
     return;
