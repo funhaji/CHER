@@ -1,16 +1,17 @@
 import { ensureSchema, resetBusinessDataPreserveCaches, sql } from "./db.js";
-import { adminIds, env } from "./env.js";
+import { env } from "./env.js";
 import { logError, logInfo } from "./log.js";
 import { getOrderToken, getStatusByPaymentId, getTronPriceToman } from "./tronado.js";
-import { getBoolSetting, getNumberSetting, getPublicBaseUrl, getSetting, setSetting } from "./settings.js";
+import { getAdminIds, getBoolSetting, getNumberSetting, getPublicBaseUrl, getSetting, setSetting } from "./settings.js";
 import { getUsdtRateTomanCached } from "./rates.js";
 import { getCryptoTomanPerUnitCached } from "./crypto-rates.js";
 import { escapeHtml, tg } from "./telegram.js";
 import { randomUUID } from "node:crypto";
 import * as crypto from "node:crypto";
 let botUsernameCache;
-function isAdmin(userId) {
-    return adminIds.includes(userId);
+async function isAdmin(userId) {
+    const ids = await getAdminIds();
+    return ids.includes(userId);
 }
 function randomCode(length = 8) {
     const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -41,23 +42,23 @@ async function sendStartMedia(chatId) {
         : "none";
     const v = String(value || "").trim();
     if (kind === "none" || !v)
-        return;
+        return null;
     try {
         if (kind === "text") {
             await tg("sendMessage", { chat_id: chatId, text: v });
-            return;
+            return null;
         }
         if (kind === "sticker") {
             await tg("sendSticker", { chat_id: chatId, sticker: v });
-            return;
+            return null;
         }
         if (kind === "animation") {
             await tg("sendAnimation", { chat_id: chatId, animation: v });
-            return;
+            return null;
         }
         if (kind === "photo") {
             await tg("sendPhoto", { chat_id: chatId, photo: v });
-            return;
+            return null;
         }
     }
     catch (e) {
@@ -350,22 +351,22 @@ async function createReferralRewardOrder(inviterId, productId, batch) {
 async function maybeGrantReferralRewards(inviterId) {
     const settings = await getReferralSettingsSnapshot();
     if (!settings.enabled || settings.threshold <= 0)
-        return;
+        return null;
     if (settings.rewardType === "wallet" && settings.walletAmount <= 0)
-        return;
+        return null;
     if (settings.rewardType === "config" && !settings.productId)
-        return;
+        return null;
     const qualifiedCount = await countUserQualifiedReferrals(inviterId);
     const totalBatches = Math.floor(qualifiedCount / settings.threshold);
     if (totalBatches <= 0)
-        return;
+        return null;
     let productName = null;
     if (settings.rewardType === "config" && settings.productId) {
         const productRows = await sql `SELECT name FROM products WHERE id = ${settings.productId} LIMIT 1;`;
         productName = productRows.length ? String(productRows[0].name || "") : null;
         if (!productName) {
             await notifyAdmins(`⚠️ سیستم دعوت تنظیم شده اما محصول جایزه پیدا نشد.\nproduct_id: ${settings.productId}`);
-            return;
+            return null;
         }
     }
     for (let batch = 1; batch <= totalBatches; batch += 1) {
@@ -568,15 +569,15 @@ async function maybeGrantReferralRewardsV2(inviterId) {
     const settings = await getReferralSettingsSnapshot();
     if (!settings.enabled) {
         logInfo("referral_reward_skipped_disabled", { inviterId });
-        return;
+        return null;
     }
     if (settings.threshold <= 0) {
         logInfo("referral_reward_skipped_invalid_threshold", { inviterId, threshold: settings.threshold });
-        return;
+        return null;
     }
     if (settings.rewardType === "wallet" && settings.walletAmount <= 0) {
         logInfo("referral_reward_skipped_wallet_amount_missing", { inviterId, walletAmount: settings.walletAmount });
-        return;
+        return null;
     }
     if (settings.rewardType === "config" && settings.configDeliveryMode === "panel" && !settings.productId) {
         logError("referral_reward_panel_missing_product", new Error("referral_reward_product_id_missing"), { inviterId });
@@ -586,13 +587,13 @@ async function maybeGrantReferralRewardsV2(inviterId) {
             text: "⚠️ حالت پنل برای جایزه دعوت فعال است اما محصول جایزه هنوز تنظیم نشده.\n" +
                 "بعد از تنظیم محصول، جایزه شما ثبت می‌شود."
         }).catch(() => { });
-        return;
+        return null;
     }
     const qualifiedCount = await countUserQualifiedReferrals(inviterId);
     const totalBatches = Math.floor(qualifiedCount / settings.threshold);
     if (totalBatches <= 0) {
         logInfo("referral_reward_skipped_no_batch", { inviterId, qualifiedCount, threshold: settings.threshold });
-        return;
+        return null;
     }
     for (let batch = 1; batch <= totalBatches; batch += 1) {
         let rewardRows = await sql `
@@ -652,7 +653,7 @@ async function maybeGrantReferralRewardsV2(inviterId) {
         `;
                 if (orderRows.length && String(orderRows[0].status || "").toLowerCase() === "awaiting_config") {
                     await notifyAdmins(`🛠 جایزه دعوت در انتظار اقدام ادمین است\nکاربر: ${inviterId}\nمرحله: ${batch}\nسفارش: ${String(orderRows[0].purchase_id || "-")}`, { inline_keyboard: [[{ text: "ارسال کانفیگ جایزه", callback_data: `admin_provide_config_${rewardOrderId}` }]] });
-                    if (adminIds.length === 0) {
+                    if ((await getAdminIds()).length === 0) {
                         await tg("sendMessage", {
                             chat_id: inviterId,
                             text: "⚠️ جایزه شما در انتظار آماده‌سازی ادمین است اما هیچ ادمینی تنظیم نشده است.\n" +
@@ -775,7 +776,7 @@ async function maybeGrantReferralRewardsV2(inviterId) {
                 await notifyAdmins(`🛠 جایزه دعوت نیازمند اقدام ادمین است\nکاربر: ${inviterId}\nمرحله: ${batch}\nمحصول: ${productName || productId}\nروش: ${settings.configDeliveryMode}\nسفارش: ${granted.purchaseId}`, {
                     inline_keyboard: [[{ text: "ارسال کانفیگ جایزه", callback_data: `admin_provide_config_${granted.orderId}` }]]
                 });
-                if (adminIds.length === 0) {
+                if ((await getAdminIds()).length === 0) {
                     await tg("sendMessage", {
                         chat_id: inviterId,
                         text: "⚠️ جایزه شما ثبت شد اما هیچ ادمینی برای تحویل کانفیگ تنظیم نشده است.\n" +
@@ -816,10 +817,10 @@ async function maybeQualifyReferralUser(userId) {
     RETURNING referred_by_telegram_id;
   `;
     if (!qualified.length)
-        return;
+        return null;
     const inviterId = Number(qualified[0].referred_by_telegram_id || 0);
     if (!Number.isFinite(inviterId) || inviterId <= 0)
-        return;
+        return null;
     const settings = await getReferralSettingsSnapshot();
     const qualifiedCount = await countUserQualifiedReferrals(inviterId);
     const referredRows = await sql `
@@ -1069,15 +1070,21 @@ export function parseDeliveryPayload(raw) {
         metadata: toJsonObject(payload.metadata) || {}
     };
 }
-function configSummaryLine(payload) {
+function configSummaryLine(payload, outboundHostHint) {
     const configCount = payload.configLinks?.length || 0;
-    if (payload.subscriptionUrl && configCount)
-        return `ساب + ${configCount} کانفیگ`;
-    if (payload.subscriptionUrl)
-        return "فقط ساب";
-    if (configCount)
-        return `${configCount} کانفیگ`;
-    return "نامشخص";
+    let base = payload.subscriptionUrl && configCount
+        ? `ساب + ${configCount} کانفیگ`
+        : payload.subscriptionUrl
+            ? "فقط ساب"
+            : configCount
+                ? `${configCount} کانفیگ`
+                : "نامشخص";
+    const h = (outboundHostHint || "").trim();
+    if (h) {
+        const short = h.length > 24 ? `${h.slice(0, 22)}…` : h;
+        base = `${base} · @${short}`;
+    }
+    return base;
 }
 function getV2rayProductKindFromRow(row) {
     const panelConfig = sanitizePanelConfig(row.panel_config);
@@ -1239,14 +1246,14 @@ async function createCryptoWalletTopup(chatId, userId, amount, w) {
     }
     if (!Number.isFinite(tomanPerUnit) || tomanPerUnit <= 0) {
         await tg("sendMessage", { chat_id: chatId, text: "نرخ کیف پول کریپتو معتبر نیست." });
-        return;
+        return null;
     }
     const decimals = String(w.currency).toUpperCase() === "USDT" ? 2 : 6;
     const factor = 10 ** decimals;
     const cryptoAmount = Math.ceil((amount / tomanPerUnit) * factor) / factor;
     if (!Number.isFinite(cryptoAmount) || cryptoAmount <= 0) {
         await tg("sendMessage", { chat_id: chatId, text: "مبلغ کریپتو معتبر نیست." });
-        return;
+        return null;
     }
     const rows = await sql `
     INSERT INTO wallet_topups (telegram_id, amount, payment_method, crypto_network, crypto_address, crypto_amount, crypto_expires_at)
@@ -1357,7 +1364,7 @@ function collectLookupCandidates(raw) {
     const push = (value) => {
         const item = String(value || "").trim();
         if (!item)
-            return;
+            return null;
         candidates.add(item);
         const lower = item.toLowerCase();
         if (lower !== item)
@@ -1433,7 +1440,7 @@ async function updatePanelCheckState(panelId, ok, message, meta, accessToken) {
           cached_meta = ${JSON.stringify(meta)}::jsonb
       WHERE id = ${panelId};
     `;
-        return;
+        return null;
     }
     await sql `
     UPDATE panels
@@ -1461,6 +1468,10 @@ async function getPanelById(panelId) {
       base_url,
       username,
       password,
+      subscription_public_port,
+      subscription_public_host,
+      subscription_link_protocol,
+      config_public_host,
       active,
       allow_customer_migration,
       allow_new_sales,
@@ -1477,6 +1488,10 @@ async function getPanelById(panelId) {
     return rows[0] || null;
 }
 function panelWizardPayload(mode, step, panelType, panelId, current) {
+    const subPortRaw = current?.subscription_public_port;
+    const subscriptionPublicPort = subPortRaw !== undefined && subPortRaw !== null && String(subPortRaw).trim() !== ""
+        ? parseMaybeNumber(subPortRaw)
+        : null;
     return {
         mode,
         step,
@@ -1485,7 +1500,8 @@ function panelWizardPayload(mode, step, panelType, panelId, current) {
         name: String(current?.name || ""),
         baseUrl: String(current?.base_url || ""),
         username: String(current?.username || ""),
-        password: String(current?.password || "")
+        password: String(current?.password || ""),
+        subscriptionPublicPort: subscriptionPublicPort !== null && subscriptionPublicPort > 0 ? subscriptionPublicPort : null
     };
 }
 async function promptPanelTypePicker(chatId, mode, panelId) {
@@ -1508,33 +1524,46 @@ async function promptPanelWizardStep(chatId, payload) {
     const mode = String(payload.mode || "add");
     const step = String(payload.step || "name");
     const panelId = Number(payload.panelId || 0);
+    const panelType = String(payload.panelType || "");
+    const totalSteps = panelType === "sanaei" ? 5 : 4;
     const keepHint = mode === "edit" ? "\nبرای نگه داشتن مقدار فعلی، فقط - بفرستید." : "";
     let text = "";
     if (step === "name") {
         text =
-            `مرحله 1 از 4 - نام پنل\n` +
-                `نوع: ${panelTypeTitle(String(payload.panelType || ""))}` +
+            `مرحله 1 از ${totalSteps} - نام پنل\n` +
+                `نوع: ${panelTypeTitle(panelType)}` +
                 (mode === "edit" ? `\nمقدار فعلی: ${String(payload.name || "-")}` : "") +
                 `${keepHint}\n\nنام پنل را بفرستید.`;
     }
     if (step === "base_url") {
         text =
-            `مرحله 2 از 4 - آدرس پنل\n` +
-                `نوع: ${panelTypeTitle(String(payload.panelType || ""))}` +
+            `مرحله 2 از ${totalSteps} - آدرس پنل\n` +
+                `نوع: ${panelTypeTitle(panelType)}` +
                 (mode === "edit" ? `\nمقدار فعلی: ${String(payload.baseUrl || "-")}` : "") +
                 `${keepHint}\n\nآدرس کامل را بفرستید.\nنمونه:\nhttps://panel.example.com`;
     }
     if (step === "username") {
         text =
-            `مرحله 3 از 4 - نام کاربری\n` +
+            `مرحله 3 از ${totalSteps} - نام کاربری\n` +
                 (mode === "edit" ? `مقدار فعلی: ${String(payload.username || "-")}` : "") +
                 `${keepHint}\n\nنام کاربری پنل را بفرستید.`;
     }
     if (step === "password") {
         text =
-            `مرحله 4 از 4 - رمز عبور\n` +
+            `مرحله 4 از ${totalSteps} - رمز عبور\n` +
                 (mode === "edit" ? `مقدار فعلی: ${maskSecret(String(payload.password || ""))}` : "") +
                 `${keepHint}\n\nرمز عبور پنل را بفرستید.`;
+    }
+    if (step === "sub_port") {
+        const cur = payload.subscriptionPublicPort !== undefined && payload.subscriptionPublicPort !== null
+            ? String(payload.subscriptionPublicPort)
+            : "خودکار (پورت آدرس پنل)";
+        text =
+            `مرحله 5 از 5 - پورت عمومی لینک سابسکریپشن (فقط Sanaei / 3x-ui)\n` +
+                `اگر ساب روی پورت دیگری سرو می‌شود (مثلاً 8080)، همان را بفرستید.\n` +
+                `0 یا auto = همان پورتی که در آدرس پنل است\n` +
+                (mode === "edit" ? `مقدار فعلی: ${cur}\nبرای نگه داشتن مقدار فعلی، - بفرستید.\n` : "") +
+                `\nپورت را بفرستید (۱–۶۵۵۳۵).`;
     }
     await tg("sendMessage", {
         chat_id: chatId,
@@ -1550,7 +1579,7 @@ async function startPanelWizard(chatId, userId, mode, panelType, panelId) {
         const panel = await getPanelById(Number(panelId));
         if (!panel) {
             await tg("sendMessage", { chat_id: chatId, text: "پنل پیدا نشد." });
-            return;
+            return null;
         }
         current = panel;
     }
@@ -1600,7 +1629,7 @@ async function promptProductPanelWizardStep(chatId, payload) {
                 text: "هیچ پنلی ثبت نشده است. اول از بخش پنل‌ها یک پنل اضافه کنید.",
                 reply_markup: { inline_keyboard: [[backButton("admin_products")]] }
             });
-            return;
+            return null;
         }
         const keyboard = panels.map((panel) => [
             cb(`${panel.name}${panel.active && panel.allow_new_sales ? "" : " ⛔"}`, `admin_product_panel_pick_${panel.id}`, "primary")
@@ -1611,7 +1640,7 @@ async function promptProductPanelWizardStep(chatId, payload) {
             text: `تنظیم فروش پنل برای «${productName}»\nمرحله 1 از 2: پنل مقصد را انتخاب کنید:`,
             reply_markup: { inline_keyboard: keyboard }
         });
-        return;
+        return null;
     }
     if (step === "mode") {
         await tg("sendMessage", {
@@ -1627,7 +1656,7 @@ async function promptProductPanelWizardStep(chatId, payload) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (step === "sell_limit") {
         await tg("sendMessage", {
@@ -1639,7 +1668,7 @@ async function promptProductPanelWizardStep(chatId, payload) {
                 `مقدار فعلی: ${payload.panelSellLimit === null || payload.panelSellLimit === undefined ? "بدون سقف" : payload.panelSellLimit}`,
             reply_markup: { inline_keyboard: [[cancelButton(`admin_product_panel_wizard_cancel_${productId}`)]] }
         });
-        return;
+        return null;
     }
     if (step === "delivery") {
         await tg("sendMessage", {
@@ -1656,7 +1685,7 @@ async function promptProductPanelWizardStep(chatId, payload) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (step === "inbound_id") {
         await tg("sendMessage", {
@@ -1664,7 +1693,7 @@ async function promptProductPanelWizardStep(chatId, payload) {
             text: `تنظیم مرحله‌ای - 3 از 5\ninbound_id را بفرستید.\n- = مقدار فعلی (${payload.inboundId || 1})`,
             reply_markup: { inline_keyboard: [[cancelButton(`admin_product_panel_wizard_cancel_${productId}`)]] }
         });
-        return;
+        return null;
     }
     if (step === "protocol") {
         await tg("sendMessage", {
@@ -1681,7 +1710,7 @@ async function promptProductPanelWizardStep(chatId, payload) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (step === "expire_days") {
         await tg("sendMessage", {
@@ -1689,7 +1718,7 @@ async function promptProductPanelWizardStep(chatId, payload) {
             text: `تنظیم مرحله‌ای - 5 از 5\nexpire_days را بفرستید.\n- = مقدار فعلی (${payload.expireDays || 30})`,
             reply_markup: { inline_keyboard: [[cancelButton(`admin_product_panel_wizard_cancel_${productId}`)]] }
         });
-        return;
+        return null;
     }
     if (step === "data_limit_mb") {
         await tg("sendMessage", {
@@ -1764,7 +1793,7 @@ async function startProductWizard(chatId, userId, mode, productId) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "محصول پیدا نشد." });
-            return;
+            return null;
         }
         current = rows[0];
     }
@@ -1808,7 +1837,7 @@ async function promptProductWizardStep(chatId, payload) {
                 keepHint,
             reply_markup: { inline_keyboard: [[cancelButton(`admin_product_wizard_cancel_${productId || 0}`)]] }
         });
-        return;
+        return null;
     }
     if (step === "product_kind") {
         await tg("sendMessage", {
@@ -1824,7 +1853,7 @@ async function promptProductWizardStep(chatId, payload) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (step === "size_mb") {
         await tg("sendMessage", {
@@ -1835,7 +1864,7 @@ async function promptProductWizardStep(chatId, payload) {
                 keepHint,
             reply_markup: { inline_keyboard: [[cancelButton(`admin_product_wizard_cancel_${productId || 0}`)]] }
         });
-        return;
+        return null;
     }
     if (step === "price_mode") {
         if (productKind === "account") {
@@ -1849,7 +1878,7 @@ async function promptProductWizardStep(chatId, payload) {
                     ]
                 }
             });
-            return;
+            return null;
         }
         await tg("sendMessage", {
             chat_id: chatId,
@@ -1862,7 +1891,7 @@ async function promptProductWizardStep(chatId, payload) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (step === "price_toman") {
         await tg("sendMessage", {
@@ -1873,7 +1902,7 @@ async function promptProductWizardStep(chatId, payload) {
                 keepHint,
             reply_markup: { inline_keyboard: [[cancelButton(`admin_product_wizard_cancel_${productId || 0}`)]] }
         });
-        return;
+        return null;
     }
     if (step === "sell_mode") {
         await tg("sendMessage", {
@@ -1887,7 +1916,7 @@ async function promptProductWizardStep(chatId, payload) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (step === "is_infinite") {
         await tg("sendMessage", {
@@ -1903,7 +1932,7 @@ async function promptProductWizardStep(chatId, payload) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (step === "panel_id") {
         const panels = await sql `
@@ -1913,7 +1942,7 @@ async function promptProductWizardStep(chatId, payload) {
     `;
         if (!panels.length) {
             await tg("sendMessage", { chat_id: chatId, text: "هیچ پنلی ثبت نشده است. اول یک پنل اضافه کنید." });
-            return;
+            return null;
         }
         const keyboard = panels.map((panel) => [
             cb(`${panel.name}${panel.active && panel.allow_new_sales ? "" : " ⛔"}`, `admin_product_wizard_panel_${panel.id}`, "primary")
@@ -1924,7 +1953,7 @@ async function promptProductWizardStep(chatId, payload) {
             text: `محصول ${mode === "add" ? "جدید" : "ویرایش"} - 7 از 9\nپنل مقصد را انتخاب کنید:`,
             reply_markup: { inline_keyboard: keyboard }
         });
-        return;
+        return null;
     }
     if (step === "panel_sell_limit") {
         await tg("sendMessage", {
@@ -1935,7 +1964,7 @@ async function promptProductWizardStep(chatId, payload) {
                 keepHint,
             reply_markup: { inline_keyboard: [[cancelButton(`admin_product_wizard_cancel_${productId || 0}`)]] }
         });
-        return;
+        return null;
     }
     if (step === "panel_delivery_mode") {
         await tg("sendMessage", {
@@ -1954,7 +1983,7 @@ async function promptProductWizardStep(chatId, payload) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (step === "inbound_id" || step === "protocol" || step === "expire_days" || step === "data_limit_mb") {
         await tg("sendMessage", {
@@ -2067,7 +2096,7 @@ async function startCardWizard(chatId, userId, mode, cardId) {
         const rows = await sql `SELECT id, label, card_number, holder_name, bank_name FROM cards WHERE id = ${Number(cardId || 0)} LIMIT 1;`;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "کارت پیدا نشد." });
-            return;
+            return null;
         }
         current = rows[0];
     }
@@ -2095,7 +2124,7 @@ async function promptCardWizardStep(chatId, payload) {
             text: `کارت ${mode === "add" ? "جدید" : "ویرایش"} - 1 از 4\nعنوان کارت را بفرستید.` + (mode === "edit" ? `\nفعلی: ${payload.label || "-"}` : "") + keepHint,
             reply_markup: cancel
         });
-        return;
+        return null;
     }
     if (step === "card_number") {
         await tg("sendMessage", {
@@ -2103,7 +2132,7 @@ async function promptCardWizardStep(chatId, payload) {
             text: `کارت ${mode === "add" ? "جدید" : "ویرایش"} - 2 از 4\nشماره کارت را بفرستید.` + (mode === "edit" ? `\nفعلی: ${payload.cardNumber || "-"}` : "") + keepHint,
             reply_markup: cancel
         });
-        return;
+        return null;
     }
     if (step === "holder_name") {
         await tg("sendMessage", {
@@ -2111,7 +2140,7 @@ async function promptCardWizardStep(chatId, payload) {
             text: `کارت ${mode === "add" ? "جدید" : "ویرایش"} - 3 از 4\nنام صاحب کارت را بفرستید.\nبرای خالی: -` + (mode === "edit" ? `\nفعلی: ${payload.holderName || "-"}` : ""),
             reply_markup: cancel
         });
-        return;
+        return null;
     }
     await tg("sendMessage", {
         chat_id: chatId,
@@ -2125,7 +2154,7 @@ async function startDiscountWizard(chatId, userId, mode, discountId) {
         const rows = await sql `SELECT id, code, type, amount, usage_limit FROM discounts WHERE id = ${Number(discountId || 0)} LIMIT 1;`;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "تخفیف پیدا نشد." });
-            return;
+            return null;
         }
         current = rows[0];
     }
@@ -2158,7 +2187,7 @@ async function promptDiscountWizardStep(chatId, payload) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (step === "code") {
         await tg("sendMessage", {
@@ -2166,7 +2195,7 @@ async function promptDiscountWizardStep(chatId, payload) {
             text: "تخفیف جدید - مرحله 1 از 4\nکد تخفیف را بفرستید. مثلا: NOW10",
             reply_markup: { inline_keyboard: [[cancelButton(`admin_discount_wizard_cancel_${discountId || 0}`)]] }
         });
-        return;
+        return null;
     }
     if (step === "type") {
         await tg("sendMessage", {
@@ -2182,7 +2211,7 @@ async function promptDiscountWizardStep(chatId, payload) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (step === "amount") {
         await tg("sendMessage", {
@@ -2193,7 +2222,7 @@ async function promptDiscountWizardStep(chatId, payload) {
                 keepHint,
             reply_markup: { inline_keyboard: [[cancelButton(`admin_discount_wizard_cancel_${discountId || 0}`)]] }
         });
-        return;
+        return null;
     }
     await tg("sendMessage", {
         chat_id: chatId,
@@ -2250,7 +2279,7 @@ async function promptAdminConfigBuilderPanel(chatId) {
     const rows = await sql `SELECT id, name, panel_type, active, allow_new_sales FROM panels ORDER BY active DESC, allow_new_sales DESC, priority DESC, id ASC;`;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "هیچ پنلی ثبت نشده است." });
-        return;
+        return null;
     }
     const keyboard = rows.map((row) => [
         cb(`${row.name} (${panelTypeTitle(String(row.panel_type || ""))})${row.active && row.allow_new_sales ? "" : " ⛔"}`, `admin_config_builder_panel_${row.id}`, "primary")
@@ -2266,7 +2295,7 @@ async function promptDirectMigrateTargetPanel(chatId) {
     const rows = await sql `SELECT id, name, active, allow_new_sales FROM panels ORDER BY active DESC, allow_new_sales DESC, priority DESC, id ASC;`;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "هیچ پنلی ثبت نشده است." });
-        return;
+        return null;
     }
     const keyboard = rows.map((row) => [cb(`${row.name}${row.active && row.allow_new_sales ? "" : " ⛔"}`, `admin_direct_migrate_panel_${row.id}`, "primary")]);
     keyboard.push([cancelButton("admin_direct_migrate_wizard_cancel")]);
@@ -2280,7 +2309,7 @@ async function showPanelDetails(chatId, panelId, notice) {
     const panel = await getPanelById(panelId);
     if (!panel) {
         await tg("sendMessage", { chat_id: chatId, text: "پنل پیدا نشد." });
-        return;
+        return null;
     }
     await tg("sendMessage", {
         chat_id: chatId,
@@ -2289,6 +2318,17 @@ async function showPanelDetails(chatId, panelId, notice) {
             `نام: ${panel.name}\n` +
             `نوع: ${panelTypeTitle(String(panel.panel_type))}\n` +
             `آدرس: ${panel.base_url}\n` +
+            (String(panel.panel_type) === "sanaei"
+                ? `پورت لینک ساب (عمومی): ${panel.subscription_public_port != null && Number(panel.subscription_public_port) > 0
+                    ? Number(panel.subscription_public_port)
+                    : "همان پورت آدرس پنل"}\n` +
+                    `دامنه لینک ساب: ${String(panel.subscription_public_host || "").trim() || "همان نام میزبان آدرس پنل"}\n` +
+                    `پروتکل لینک ساب: ${(() => {
+                        const p = String(panel.subscription_link_protocol || "").trim().toLowerCase();
+                        return p === "http" || p === "https" ? p : "همان پروتکل آدرس پنل";
+                    })()}\n` +
+                    `دامنه نمایش در کانفیگ: ${String(panel.config_public_host || "").trim() || "همان تشخیص خودکار (محصول/پنل)"}\n`
+                : "") +
             `یوزرنیم: ${panel.username || "-"}\n` +
             `وضعیت: ${panel.active ? "فعال" : "غیرفعال"}\n` +
             `فروش جدید: ${panel.allow_new_sales ? "روشن" : "خاموش"}\n` +
@@ -2304,6 +2344,15 @@ async function showPanelDetails(chatId, panelId, notice) {
                     cb("✏️ ویرایش", `admin_panel_edit_${panel.id}`, "primary"),
                     cb("🧪 تست", `admin_panel_test_${panel.id}`, "primary")
                 ],
+                ...(String(panel.panel_type) === "sanaei"
+                    ? [
+                        [
+                            cb("🔢 پورت ساب", `admin_panel_set_subport_${panel.id}`, "primary"),
+                            cb("🔗 دامنه/پروتکل ساب", `admin_panel_set_suburl_${panel.id}`, "primary")
+                        ],
+                        [cb("🌐 دامنه کانفیگ", `admin_panel_set_confighost_${panel.id}`, "primary")]
+                    ]
+                    : []),
                 [
                     cb(panel.active ? "⛔ غیرفعال" : "✅ فعال", `admin_panel_toggle_${panel.id}`, panel.active ? "danger" : "success"),
                     cb(panel.allow_new_sales ? "🛑 بستن فروش" : "🟢 بازکردن فروش", `admin_panel_toggle_sales_${panel.id}`, panel.allow_new_sales ? "danger" : "success")
@@ -2320,13 +2369,13 @@ async function showPanelDetails(chatId, panelId, notice) {
         }
     });
 }
-function mainMenuMarkup(userId) {
+async function mainMenuMarkup(userId) {
     const rows = [
         [cb("🛍 خرید کانفیگ", "buy_menu", "primary"), cb("📦 سفارش‌ها و کانفیگ‌ها", "my_configs", "primary")],
         [cb("👛 کیف پول", "wallet_menu", "success"), cb("🎁 دعوت دوستان", "referral_menu", "success")],
         [cb("🆘 پشتیبانی", "support", "primary")]
     ];
-    if (isAdmin(userId)) {
+    if (await isAdmin(userId)) {
         rows.push([cb("🛠 پنل ادمین", "admin_panel", "primary")]);
     }
     return { inline_keyboard: rows };
@@ -2351,7 +2400,7 @@ async function sendMainMenu(chatId, userId, text) {
         text: text ||
             "🏠 منوی اصلی\n\n" +
                 "از گزینه‌های زیر می‌توانید خرید، پیگیری سفارش، مدیریت کیف پول و دعوت دوستان را انجام دهید.",
-        reply_markup: mainMenuMarkup(userId)
+        reply_markup: await mainMenuMarkup(userId)
     });
 }
 async function sendWalletMenu(chatId, userId) {
@@ -2385,7 +2434,7 @@ async function showWalletTransactions(chatId, userId) {
             text: "🧾 هنوز تراکنشی برای کیف پول شما ثبت نشده است.",
             reply_markup: { inline_keyboard: [[backButton("wallet_menu")], [homeButton()]] }
         });
-        return;
+        return null;
     }
     const lines = rows.map((row, idx) => {
         const amount = Number(row.amount || 0);
@@ -2414,7 +2463,7 @@ async function showReferralInvitees(chatId, userId) {
             text: "👥 هنوز کسی با لینک شما وارد ربات نشده است.",
             reply_markup: { inline_keyboard: [[backButton("referral_menu")], [homeButton()]] }
         });
-        return;
+        return null;
     }
     const lines = rows.map((row, idx) => {
         const username = row.username ? `@${String(row.username)}` : "-";
@@ -2452,7 +2501,7 @@ async function showReferralRewardHistory(chatId, userId) {
             text: "🎁 هنوز جایزه‌ای از بخش دعوت دوستان برای شما ثبت نشده است.",
             reply_markup: { inline_keyboard: [[backButton("referral_menu")], [homeButton()]] }
         });
-        return;
+        return null;
     }
     const lines = rows.map((row, idx) => {
         const rewardType = normalizeReferralRewardType(row.reward_type);
@@ -2491,7 +2540,7 @@ async function sendReferralMenu(chatId, userId) {
                 "بعد از فعال‌سازی توسط ادمین، لینک اختصاصی و جزئیات پاداش شما اینجا نمایش داده می‌شود.",
             reply_markup: { inline_keyboard: [[homeButton()]] }
         });
-        return;
+        return null;
     }
     const inviteLink = await buildReferralInviteLink(userId);
     const totalInvites = await countUserReferralLeads(userId);
@@ -2729,7 +2778,7 @@ async function showPanelAdminMenu(chatId, notice) {
                 ]
             }
         });
-        return;
+        return null;
     }
     const keyboard = rows.flatMap((p) => [
         [
@@ -3036,12 +3085,12 @@ async function performRegenLink(inventoryId, actorUserId, isAdminReq, chatId) {
   `;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "کانفیگ پیدا نشد." });
-        return;
+        return null;
     }
     const row = rows[0];
     if (!isAdminReq && row.owner_telegram_id !== actorUserId) {
         await tg("sendMessage", { chat_id: chatId, text: "این کانفیگ متعلق به شما نیست." });
-        return;
+        return null;
     }
     const delivery = parseDeliveryPayload(row.delivery_payload);
     const panelType = String(delivery.metadata?.panelType || "");
@@ -3049,17 +3098,17 @@ async function performRegenLink(inventoryId, actorUserId, isAdminReq, chatId) {
     const key = String(delivery.metadata?.username || delivery.metadata?.uuid || delivery.metadata?.email || delivery.metadata?.subId || "").trim();
     if (!panelId || !panelType || !key) {
         await tg("sendMessage", { chat_id: chatId, text: "این کانفیگ پنلی نیست یا شناسه معتبر ندارد." });
-        return;
+        return null;
     }
     const panelRows = await sql `
-    SELECT id, panel_type, base_url, username, password
+    SELECT id, panel_type, base_url, username, password, subscription_public_port, subscription_public_host, subscription_link_protocol, config_public_host
     FROM panels
     WHERE id = ${panelId}
     LIMIT 1;
   `;
     if (!panelRows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "پنل مرتبط پیدا نشد." });
-        return;
+        return null;
     }
     let regenMessage = "عملیات انجام نشد.";
     let newUuid;
@@ -3076,7 +3125,7 @@ async function performRegenLink(inventoryId, actorUserId, isAdminReq, chatId) {
         else {
             regenMessage = `خطا در تغییر لینک: ${result.message}`;
             await tg("sendMessage", { chat_id: chatId, text: regenMessage });
-            return;
+            return null;
         }
     }
     else {
@@ -3085,12 +3134,17 @@ async function performRegenLink(inventoryId, actorUserId, isAdminReq, chatId) {
             regenMessage = "تغییر لینک با موفقیت انجام شد ✅";
             newUuid = String(result.client.id || "");
             const panelConfig = (typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : row.panel_config) || {};
-            newConfigLinks = buildSanaeiConfigLinks(String(panelRows[0].base_url), result.inbound, result.client, panelConfig);
+            const mergedCfg = mergeSanaeiPanelRowIntoClientConfig(panelConfig, panelRows[0]);
+            newConfigLinks = buildSanaeiConfigLinks(String(panelRows[0].base_url), result.inbound, result.client, mergedCfg);
+            const subId = String(result.client.subId || "");
+            newSubscriptionUrl = subId
+                ? buildSanaeiSubscriptionUrl(String(panelRows[0].base_url), panelConfig, subId, panelRows[0])
+                : undefined;
         }
         else {
             regenMessage = `خطا در تغییر لینک: ${result.message}`;
             await tg("sendMessage", { chat_id: chatId, text: regenMessage });
-            return;
+            return null;
         }
     }
     await recordInventoryForensicEvent(inventoryId, isAdminReq ? "admin_regen_link" : "customer_regen_link", { actor: actorUserId, panelResult: regenMessage });
@@ -3138,7 +3192,7 @@ async function lookupIdentifierInPanels(raw) {
     if (!identifier)
         return { ok: false, message: "empty_identifier" };
     const panels = await sql `
-    SELECT id, name, panel_type, base_url, username, password, active
+    SELECT id, name, panel_type, base_url, username, password, active, subscription_public_port, subscription_public_host, subscription_link_protocol, config_public_host
     FROM panels
     WHERE active = TRUE
     ORDER BY priority DESC, id ASC;
@@ -3157,6 +3211,9 @@ async function lookupIdentifierInPanels(raw) {
                 panelName: String(panel.name),
                 panelBaseUrl: String(panel.base_url || ""),
                 panelType: "marzban",
+                subscriptionPublicPort: null,
+                subscriptionPublicHost: null,
+                subscriptionLinkProtocol: null,
                 ownerTelegramId: ownerTg,
                 panelUserKey: String(found.user.username || identifier),
                 panelUser: found.user
@@ -3169,6 +3226,10 @@ async function lookupIdentifierInPanels(raw) {
             const client = found.client;
             const ownerTg = parsePanelUserTelegramId(client.tgId || client.email || "");
             const panelUserKey = String(client.id || client.subId || client.email || identifier);
+            const subPort = parseMaybeNumber(panel.subscription_public_port);
+            const subHost = sanitizeSubscriptionPublicHostInput(String(panel.subscription_public_host || ""));
+            const subProtoRaw = String(panel.subscription_link_protocol || "").trim().toLowerCase();
+            const subProto = subProtoRaw === "http" || subProtoRaw === "https" ? subProtoRaw : null;
             return {
                 ok: true,
                 source: "panel",
@@ -3176,6 +3237,9 @@ async function lookupIdentifierInPanels(raw) {
                 panelName: String(panel.name),
                 panelBaseUrl: String(panel.base_url || ""),
                 panelType: "sanaei",
+                subscriptionPublicPort: subPort !== null && subPort > 0 ? subPort : null,
+                subscriptionPublicHost: subHost || null,
+                subscriptionLinkProtocol: subProto,
                 ownerTelegramId: ownerTg,
                 panelUserKey,
                 panelUser: client,
@@ -3286,7 +3350,7 @@ async function recordInventoryForensicEvent(inventoryId, eventType, metadata) {
     LIMIT 1;
   `;
     if (!rows.length)
-        return;
+        return null;
     const row = rows[0];
     const delivery = parseDeliveryPayload(row.delivery_payload);
     const panelType = delivery.metadata?.panelType ? String(delivery.metadata.panelType) : null;
@@ -3342,9 +3406,93 @@ function parseSanaeiNested(raw) {
     }
     return raw;
 }
-export function buildSanaeiSubscriptionUrl(baseUrl, panelConfig, subId) {
+function resolveSanaeiSubscriptionPublicPort(panelConfig, panelRow) {
+    const fromRow = panelRow ? parseMaybeNumber(panelRow.subscription_public_port) : null;
+    if (fromRow !== null && fromRow > 0 && fromRow <= 65535)
+        return fromRow;
+    const fromConfig = parseMaybeNumber(panelConfig.subscription_public_port ?? panelConfig.sub_link_port);
+    if (fromConfig !== null && fromConfig > 0 && fromConfig <= 65535)
+        return fromConfig;
+    return null;
+}
+/** Hostname for public subscription URL or for @host in vless/vmess links (panel-level override). */
+function sanitizeSubscriptionPublicHostInput(raw) {
+    const trimmed = raw.trim();
+    if (!trimmed)
+        return null;
+    let candidate = trimmed;
+    if (/^https?:\/\//i.test(candidate)) {
+        try {
+            return new URL(candidate).hostname || null;
+        }
+        catch {
+            return null;
+        }
+    }
+    candidate = candidate.split("/")[0].trim();
+    if (candidate.includes(":") && !candidate.startsWith("[")) {
+        candidate = candidate.split(":")[0].trim();
+    }
+    if (!candidate)
+        return null;
+    try {
+        return new URL(`https://${candidate}`).hostname || null;
+    }
+    catch {
+        return null;
+    }
+}
+function resolveSanaeiSubscriptionLinkProtocol(panelRow) {
+    if (!panelRow)
+        return null;
+    const p = String(panelRow.subscription_link_protocol || "").trim().toLowerCase();
+    return p === "http" || p === "https" ? p : null;
+}
+/** Merge panel row `config_public_host` into product panel_config so buildSanaeiConfigLinks uses it as server_host. */
+export function mergeSanaeiPanelRowIntoClientConfig(panelConfig, panelRow) {
+    if (!panelRow)
+        return panelConfig;
+    const host = sanitizeSubscriptionPublicHostInput(String(panelRow.config_public_host || ""));
+    if (!host)
+        return panelConfig;
+    return { ...panelConfig, server_host: host };
+}
+/** Subscription URL for 3x-ui; optional panel row supplies subscription_public_port when it differs from panel UI port. */
+export function buildSanaeiSubscriptionUrl(baseUrl, panelConfig, subId, panelRow) {
     const customPath = String(panelConfig.subscription_path || panelConfig.sub_path || "sub").replace(/^\/+|\/+$/g, "");
-    return `${normalizeBaseUrl(baseUrl)}/${customPath}/${encodeURIComponent(subId)}`;
+    const portOverride = resolveSanaeiSubscriptionPublicPort(panelConfig, panelRow);
+    const hostOverride = panelRow ? sanitizeSubscriptionPublicHostInput(String(panelRow.subscription_public_host || "")) : null;
+    const protocolOverride = resolveSanaeiSubscriptionLinkProtocol(panelRow);
+    let root = normalizeBaseUrl(baseUrl);
+    try {
+        const u = new URL(root);
+        if (portOverride !== null)
+            u.port = String(portOverride);
+        if (hostOverride)
+            u.hostname = hostOverride;
+        if (protocolOverride)
+            u.protocol = `${protocolOverride}:`;
+        const path = u.pathname.replace(/\/+$/, "");
+        root = `${u.origin}${path === "/" ? "" : path}`;
+    }
+    catch {
+        /* keep root */
+    }
+    return `${root}/${customPath}/${encodeURIComponent(subId)}`;
+}
+function sanaeiSubscriptionUrlsMatchSubId(storedUrl, canonicalUrl) {
+    try {
+        const ua = new URL(storedUrl.trim());
+        const ub = new URL(canonicalUrl.trim());
+        const sa = ua.pathname.split("/").filter(Boolean);
+        const sb = ub.pathname.split("/").filter(Boolean);
+        if (!sa.length || !sb.length)
+            return false;
+        return decodeURIComponent(sa[sa.length - 1] || "") === decodeURIComponent(sb[sb.length - 1] || "");
+    }
+    catch {
+        return storedUrl.trim() === canonicalUrl.trim();
+    }
 }
 function extractSanaeiHost(panelBaseUrl, panelConfig, inbound) {
     const explicitHost = String(panelConfig.server_host || panelConfig.host || "").trim();
@@ -3465,6 +3613,95 @@ export function buildSanaeiConfigLinks(panelBaseUrl, inbound, client, panelConfi
     }
     return links.filter(Boolean);
 }
+/** Bracket IPv6 for vless/trojan/ss authority section. */
+function formatHostForShareUri(hostname) {
+    const h = hostname.trim();
+    if (!h)
+        return h;
+    if (h.includes(":") && !h.startsWith("["))
+        return `[${h}]`;
+    return h;
+}
+/** Rewrite outbound host in a share link (vless / trojan / vmess / ss) without panel API. */
+function replaceShareLinkOutboundHost(link, newHost) {
+    const nh = formatHostForShareUri(newHost);
+    if (!nh)
+        return link;
+    const s = link.trim();
+    if (s.startsWith("vless://") || s.startsWith("trojan://")) {
+        const scheme = s.startsWith("vless://") ? "vless://" : "trojan://";
+        const rest = s.slice(scheme.length);
+        const at = rest.indexOf("@");
+        if (at < 0)
+            return link;
+        const cred = rest.slice(0, at);
+        const tail = rest.slice(at + 1);
+        let port = "";
+        let suffix = "";
+        if (tail.startsWith("[")) {
+            const bi = tail.indexOf("]");
+            if (bi < 0)
+                return link;
+            const after = tail.slice(bi + 1);
+            const pm = after.match(/^(:[0-9]+)?(\?[^#]*)?(#.*)?$/);
+            port = pm?.[1] || "";
+            suffix = `${pm?.[2] || ""}${pm?.[3] || ""}`;
+        }
+        else {
+            const m = tail.match(/^([^:\\/?#]+)(:\\d+)?(\\?[^#]*)?(#.*)?$/);
+            if (!m)
+                return link;
+            port = m[2] || "";
+            suffix = `${m[3] || ""}${m[4] || ""}`;
+        }
+        return `${scheme}${cred}@${nh}${port}${suffix}`;
+    }
+    if (s.startsWith("vmess://")) {
+        try {
+            const buf = Buffer.from(s.slice(8), "base64");
+            const j = JSON.parse(buf.toString("utf8"));
+            if (j && typeof j === "object") {
+                j.add = newHost;
+                return `vmess://${Buffer.from(JSON.stringify(j), "utf8").toString("base64")}`;
+            }
+        }
+        catch {
+            return link;
+        }
+    }
+    if (s.startsWith("ss://")) {
+        const body = s.slice(5);
+        const at = body.lastIndexOf("@");
+        if (at < 0)
+            return link;
+        const cred = body.slice(0, at);
+        const tail = body.slice(at + 1);
+        const m = tail.match(/^([^:\/?#]+)(:\d+)?(\?[^#]*)?(#.*)?$/);
+        if (!m)
+            return link;
+        return `ss://${cred}@${nh}${m[2] || ""}${m[3] || ""}${m[4] || ""}`;
+    }
+    return link;
+}
+/** Recompute subscription + direct links from stored delivery + current panel row (list / labels). */
+function applyLiveSanaeiPanelOverridesToDeliveryPayload(payload, panelRow, productPanelConfig) {
+    const baseUrl = String(panelRow.base_url || "");
+    const merged = mergeSanaeiPanelRowIntoClientConfig(sanitizePanelConfig(productPanelConfig), panelRow);
+    const host = extractSanaeiHost(baseUrl, merged, {});
+    const subId = String(payload.metadata?.subId || "").trim();
+    const subscriptionUrl = subId ? buildSanaeiSubscriptionUrl(baseUrl, merged, subId, panelRow) : payload.subscriptionUrl;
+    const configLinks = (payload.configLinks || []).map((l) => replaceShareLinkOutboundHost(l, host));
+    return {
+        outboundHost: host,
+        payload: {
+            ...payload,
+            subscriptionUrl: subscriptionUrl || payload.subscriptionUrl,
+            configLinks,
+            primaryQr: buildQrText(payload.primaryText, configLinks, subscriptionUrl || payload.subscriptionUrl),
+            primaryText: payload.primaryText
+        }
+    };
+}
 async function provisionMarzbanSale(panel, order, panelConfig) {
     const login = await loginMarzbanPanel({
         base_url: String(panel.base_url),
@@ -3477,10 +3714,14 @@ async function provisionMarzbanSale(panel, order, panelConfig) {
     const days = parseMaybeNumber(panelConfig.expire_days || panelConfig.days) || 0;
     const expireTime = days > 0 ? Date.now() + days * 24 * 60 * 60 * 1000 : 0;
     const dataLimitBytes = Math.max(0, Math.round((parseMaybeNumber(panelConfig.data_limit_mb) || Number(order.size_mb || 0)) * 1024 * 1024));
-    const username = String(panelConfig.username_prefix || "tg")
-        .concat(`${order.telegram_id}_${Date.now()}`)
-        .replace(/[^a-zA-Z0-9_]/g, "_")
-        .slice(0, 32);
+    // Use order's config_name if provided, otherwise generate with prefix + telegram_id + timestamp
+    const configNameFromOrder = String(order.config_name || "").trim();
+    const username = configNameFromOrder
+        ? configNameFromOrder.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 32)
+        : String(panelConfig.username_prefix || "tg")
+            .concat(`${order.telegram_id}_${Date.now()}`)
+            .replace(/[^a-zA-Z0-9_]/g, "_")
+            .slice(0, 32);
     const context = buildPanelTemplateContext({
         purchaseId: String(order.purchase_id),
         telegramId: Number(order.telegram_id),
@@ -3568,10 +3809,14 @@ async function provisionSanaeiSale(panel, order, panelConfig) {
     const clientId = randomUUID();
     const clientPassword = randomUUID().replaceAll("-", "");
     const subId = randomCode(16).toLowerCase();
-    const email = String(panelConfig.email_prefix || "tg")
-        .concat(`${order.telegram_id}_${Date.now()}`)
-        .replace(/[^\w@.\-]/g, "_")
-        .slice(0, 64);
+    // Use order's config_name if provided, otherwise generate with prefix + telegram_id + timestamp
+    const configNameFromOrder = String(order.config_name || "").trim();
+    const email = configNameFromOrder
+        ? configNameFromOrder.replace(/[^\w@.\-]/g, "_").slice(0, 64)
+        : String(panelConfig.email_prefix || "tg")
+            .concat(`${order.telegram_id}_${Date.now()}`)
+            .replace(/[^\w@.\-]/g, "_")
+            .slice(0, 64);
     const context = buildPanelTemplateContext({
         purchaseId: String(order.purchase_id),
         telegramId: Number(order.telegram_id),
@@ -3626,8 +3871,9 @@ async function provisionSanaeiSale(panel, order, panelConfig) {
     if (!ok) {
         throw new Error(`Sanaei create client failed: ${res.status} ${responseSnippet(raw)}`);
     }
-    const configLinks = buildSanaeiConfigLinks(String(panel.base_url), inbound, toJsonObject(client) || {}, panelConfig);
-    const subscriptionUrl = buildSanaeiSubscriptionUrl(String(panel.base_url), panelConfig, subId);
+    const mergedClientCfg = mergeSanaeiPanelRowIntoClientConfig(panelConfig, panel);
+    const configLinks = buildSanaeiConfigLinks(String(panel.base_url), inbound, toJsonObject(client) || {}, mergedClientCfg);
+    const subscriptionUrl = buildSanaeiSubscriptionUrl(String(panel.base_url), panelConfig, subId, panel);
     const deliveryMode = String(order.panel_delivery_mode || "both");
     const finalLinks = deliveryMode === "sub" ? [] : configLinks;
     const finalSub = deliveryMode === "configs" ? null : subscriptionUrl;
@@ -3753,7 +3999,7 @@ async function showCustomerMigrationTargets(chatId, inventoryId, userId) {
   `;
     if (!ownRows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "کانفیگ انتخاب‌شده معتبر نیست." });
-        return;
+        return null;
     }
     const rows = await sql `
     SELECT id, name, panel_type
@@ -3763,7 +4009,7 @@ async function showCustomerMigrationTargets(chatId, inventoryId, userId) {
   `;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "فعلاً مقصد فعالی برای مهاجرت آزاد نشده است." });
-        return;
+        return null;
     }
     const keyboard = rows.map((p) => [
         { text: `${p.name} (${String(p.panel_type).toUpperCase()})`, callback_data: `migrate_pick_${inventoryId}_${p.id}` }
@@ -3878,7 +4124,7 @@ async function showMyMigrations(chatId, userId) {
   `;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "هنوز درخواست انتقالی ندارید." });
-        return;
+        return null;
     }
     const lines = rows.map((r) => `#${r.id} | کانفیگ ${r.source_inventory_id} → ${r.panel_name} | ${r.status} | ${r.created_at}`);
     await tg("sendMessage", {
@@ -3905,7 +4151,7 @@ async function showMyOrders(chatId, userId) {
   `;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "هنوز سفارشی ثبت نکرده‌ای." });
-        return;
+        return null;
     }
     const keyboard = rows.map((o) => [
         cb(`${String(o.purchase_id)} | ${String(o.product_name)} | ${formatOrderStatusTitle(o.status)}`, `open_order_${String(o.purchase_id)}`, "primary")
@@ -3940,7 +4186,7 @@ async function showOrderDetails(chatId, userId, purchaseId) {
   `;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "سفارش پیدا نشد یا متعلق به تو نیست." });
-        return;
+        return null;
     }
     const o = rows[0];
     const statusTitle = formatOrderStatusTitle(o.status);
@@ -4063,7 +4309,7 @@ async function showProducts(chatId, forBuy) {
   `;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "هیچ محصول فعالی تعریف نشده است." });
-        return;
+        return null;
     }
     const dayPrice = customEnabled ? Math.max(0, Math.round((await getNumberSetting("custom_v2ray_extra_day_toman")) || 0)) : 0;
     const pricePerGb = customEnabled
@@ -4138,13 +4384,13 @@ async function showWalletUsagePrompt(chatId, userId, productId, walletBalance) {
     const productRows = await sql `SELECT price_toman FROM products WHERE id = ${productId} LIMIT 1;`;
     if (!productRows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "محصول یافت نشد." });
-        return;
+        return null;
     }
     const productPrice = Number(productRows[0].price_toman || 0);
     const maxUsable = Math.min(walletBalance, productPrice);
     if (maxUsable <= 0) {
         await showPaymentMethods(chatId, userId, productId, 0);
-        return;
+        return null;
     }
     const keyboard = [
         [cb(`✅ استفاده از حداکثر ممکن (${formatPriceToman(maxUsable)} تومان)`, `use_wallet_${productId}_${maxUsable}`, "success")],
@@ -4164,14 +4410,14 @@ async function showPaymentMethods(chatId, userId, productId, walletUsed = 0) {
     const productRows = await sql `SELECT price_toman FROM products WHERE id = ${productId} LIMIT 1;`;
     if (!productRows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "محصول یافت نشد." });
-        return;
+        return null;
     }
     const productPrice = Number(productRows[0].price_toman || 0);
     const finalPayable = Math.max(0, productPrice - walletUsed);
     const rows = await sql `SELECT code, title FROM payment_methods WHERE active = TRUE ORDER BY code ASC;`;
     if (!rows.length && walletBalance < finalPayable) {
         await tg("sendMessage", { chat_id: chatId, text: "فعلاً هیچ روش پرداخت فعالی وجود ندارد و موجودی کیف پول شما هم کافی نیست." });
-        return;
+        return null;
     }
     const callbackBase = await getPublicBaseUrl(env.PUBLIC_BASE_URL);
     const hasCards = (await sql `SELECT 1 FROM cards WHERE active = TRUE LIMIT 1;`).length > 0;
@@ -4214,7 +4460,7 @@ async function showPaymentMethods(chatId, userId, productId, walletUsed = 0) {
             `swapwalletShop:${hasSwapwalletShop ? "ok" : "missing"}\n` +
             `businessWallet:${hasBusinessWallet ? "ok" : "missing"}\n` +
             `cryptoReady:${hasCrypto ? "ok" : "missing"}`, { inline_keyboard: [[{ text: "⚙️ تنظیمات درگاه‌ها", callback_data: "admin_gateway_settings" }]] });
-        return;
+        return null;
     }
     const keyboard = [];
     if (walletUsed >= productPrice) {
@@ -4290,7 +4536,7 @@ async function startCustomV2rayWizard(chatId, userId, productId) {
     const selectedProductId = Number((await getSetting("custom_v2ray_product_id")) || 0);
     if (!enabled || !selectedProductId || selectedProductId !== productId) {
         await tg("sendMessage", { chat_id: chatId, text: "محصول سفارشی فعال نیست یا درست تنظیم نشده است." });
-        return;
+        return null;
     }
     const rows = await sql `
     SELECT id, name, price_toman, size_mb, is_infinite, sell_mode, panel_id, panel_delivery_mode, panel_config
@@ -4300,12 +4546,12 @@ async function startCustomV2rayWizard(chatId, userId, productId) {
   `;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "محصول یافت نشد." });
-        return;
+        return null;
     }
     const product = rows[0];
     if (getV2rayProductKindFromRow(product) !== "v2ray") {
         await tg("sendMessage", { chat_id: chatId, text: "این محصول سفارشی نیست." });
-        return;
+        return null;
     }
     const baseMb = 1024;
     const baseDays = 30;
@@ -4327,7 +4573,7 @@ async function startCustomV2rayWizard(chatId, userId, productId) {
 async function renderCustomV2rayWizard(chatId, userId, messageId) {
     const state = await getState(userId);
     if (!state || state.state !== "custom_v2ray_wizard")
-        return;
+        return null;
     const p = state.payload || {};
     const productId = Number(p.productId);
     const baseMb = Math.max(1, Math.round(Number(p.baseMb || 0)));
@@ -4367,7 +4613,7 @@ async function renderCustomV2rayWizard(chatId, userId, messageId) {
         await tg("editMessageText", { chat_id: chatId, message_id: targetMessageId, text, reply_markup: { inline_keyboard: keyboard } }).catch((e) => {
             logError("custom_v2ray_edit_failed", e, { userId, chatId, messageId: targetMessageId });
         });
-        return;
+        return null;
     }
     const msg = await tg("sendMessage", { chat_id: chatId, text, reply_markup: { inline_keyboard: keyboard } });
     await setState(userId, "custom_v2ray_wizard", { ...p, messageId: Number(msg?.message_id || 0), dataMb, days });
@@ -4400,7 +4646,7 @@ async function showCustomWalletUsagePrompt(chatId, userId, totalPrice) {
     const maxUsable = Math.min(walletBalance, totalPrice);
     if (maxUsable <= 0) {
         await showCustomPaymentMethods(chatId, userId, totalPrice, 0);
-        return;
+        return null;
     }
     const keyboard = [
         [cb(`✅ استفاده از حداکثر ممکن (${formatPriceToman(maxUsable)} تومان)`, `custom_v2ray_use_wallet_${maxUsable}`, "success")],
@@ -4460,7 +4706,7 @@ async function showCustomPaymentMethods(chatId, userId, totalPrice, walletUsed) 
             `swapwalletShop:${hasSwapwalletShop ? "ok" : "missing"}\n` +
             `businessWallet:${hasBusinessWallet ? "ok" : "missing"}\n` +
             `cryptoReady:${hasCrypto ? "ok" : "missing"}`, { inline_keyboard: [[{ text: "⚙️ تنظیمات درگاه‌ها", callback_data: "admin_gateway_settings" }]] });
-        return;
+        return null;
     }
     const keyboard = [];
     if (safeWalletUsed >= totalPrice) {
@@ -4507,6 +4753,41 @@ async function showDiscountChoice(chatId, productId, paymentMethod, walletUsed =
     });
 }
 async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFileId, animationFileId, state) {
+    if (state.state === "await_bulk_quantity") {
+        const quantity = Number(text.trim());
+        if (!Number.isFinite(quantity) || quantity < 1 || quantity > 100) {
+            await tg("sendMessage", { chat_id: chatId, text: "تعداد باید عددی بین 1 تا 100 باشد." });
+            return true;
+        }
+        const productId = Number(state.payload?.productId || 0);
+        await setState(userId, "await_config_name", { productId, quantity });
+        await tg("sendMessage", {
+            chat_id: chatId,
+            text: `برای ${quantity} عدد${quantity > 1 ? " از" : ""} محصول یک نام انتخاب کنید:\n(اگر نام تکراری باشد، عدد تصادفی اضافه می‌شود)\n\nمثال: config1, myVPN, etc`
+        });
+        return true;
+    }
+    if (state.state === "await_config_name") {
+        const configName = text.trim();
+        if (!configName || configName.length < 1 || configName.length > 50) {
+            await tg("sendMessage", { chat_id: chatId, text: "نام باید بین 1 تا 50 کاراکتر باشد." });
+            return true;
+        }
+        const productId = Number(state.payload?.productId || 0);
+        const quantity = Number(state.payload?.quantity || 1);
+        await clearState(userId);
+        const userRows = await sql `SELECT wallet_balance FROM users WHERE telegram_id = ${userId} LIMIT 1;`;
+        const walletBalance = userRows.length ? Number(userRows[0].wallet_balance || 0) : 0;
+        if (walletBalance > 0) {
+            await setState(userId, "bulk_purchase_pending", { productId, quantity, configName });
+            await showWalletUsagePrompt(chatId, userId, productId, walletBalance);
+        }
+        else {
+            await setState(userId, "bulk_purchase_pending", { productId, quantity, configName });
+            await showPaymentMethods(chatId, userId, productId, 0);
+        }
+        return true;
+    }
     if (state.state === "await_wallet_custom_amount") {
         const productId = Number(state.payload.productId);
         const amount = Number(text.trim());
@@ -4532,6 +4813,25 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
         }
         await clearState(userId);
         await showPaymentMethods(chatId, userId, productId, amount);
+        return true;
+    }
+    if (state.state === "await_custom_v2ray_name") {
+        const configName = text.trim();
+        if (!configName || configName.length < 1 || configName.length > 50) {
+            await tg("sendMessage", { chat_id: chatId, text: "نام باید بین 1 تا 50 کاراکتر باشد." });
+            return true;
+        }
+        const checkout = sanitizePanelConfig(state.payload.checkout);
+        if (!checkout || !checkout.productId) {
+            await clearState(userId);
+            await tg("sendMessage", { chat_id: chatId, text: "جلسه سفارش سفارشی منقضی شده. دوباره از اول شروع کن." });
+            return true;
+        }
+        // Store config name in checkout and proceed to wallet prompt
+        const checkoutWithName = { ...checkout, configName };
+        await clearState(userId);
+        await setState(userId, "custom_v2ray_checkout", checkoutWithName);
+        await showCustomWalletUsagePrompt(chatId, userId, checkout.totalPrice);
         return true;
     }
     if (state.state === "await_custom_wallet_amount") {
@@ -4649,7 +4949,7 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
         AND telegram_id = ${userId}
         AND status = 'pending'
         AND payment_method = 'crypto'
-      RETURNING id, purchase_id, product_name_snapshot, final_price, crypto_currency, crypto_network, crypto_amount, crypto_address;
+      RETURNING id, purchase_id, product_name_snapshot, panel_delivery_mode, final_price, crypto_currency, crypto_network, crypto_amount, crypto_address;
     `;
         await clearState(userId);
         if (!rows.length) {
@@ -4666,20 +4966,21 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
     `;
         const tgUsername = profileRows.length && profileRows[0].username ? `@${String(profileRows[0].username)}` : "-";
         const tgFullName = [profileRows[0]?.first_name, profileRows[0]?.last_name].filter(Boolean).join(" ").trim() || "-";
+        const directCryptoDeliveryLabel = formatDeliveryModeLabel(parseDeliveryMode(String(rows[0].panel_delivery_mode || "")));
         const caption = `🪙 درخواست تایید پرداخت کریپتو\n` +
             `سفارش: ${rows[0].purchase_id}\n` +
             `کاربر: ${userId}\n` +
             `یوزرنیم: ${tgUsername}\n` +
             `نام: ${tgFullName}\n` +
             `محصول: ${rows[0].product_name_snapshot || "-"}\n` +
+            `تحویل: ${directCryptoDeliveryLabel}\n` +
             `مبلغ: ${formatPriceToman(Number(rows[0].final_price))} تومان\n` +
             `ارز: ${rows[0].crypto_currency || "-"}\n` +
             `شبکه: ${rows[0].crypto_network || "-"}\n` +
             `مقدار: ${rows[0].crypto_amount || "-"}\n` +
             `آدرس: ${shortAddr(String(rows[0].crypto_address || ""))}`;
-        for (const adminId of adminIds) {
+        for (const adminId of await getAdminIds()) {
             await tg("sendPhoto", {
-                chat_id: adminId,
                 photo: photoFileId,
                 caption,
                 reply_markup: {
@@ -4731,7 +5032,7 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
             ? `\nشبکه: ${String(rows[0].crypto_network || "-")}\nمقدار: ${String(rows[0].crypto_amount || "-")}\nآدرس: ${shortAddr(String(rows[0].crypto_address || ""))}`
             : "";
         await clearState(userId);
-        for (const adminId of adminIds) {
+        for (const adminId of await getAdminIds()) {
             try {
                 await tg("sendPhoto", {
                     chat_id: adminId,
@@ -4764,8 +5065,16 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
         const productId = Number(state.payload.productId);
         const paymentMethod = String(state.payload.paymentMethod || "tronado");
         const walletUsed = Number(state.payload.walletUsed || 0);
+        const discountCode = text.trim() || null;
+        const quantity = Number(state.payload?.quantity || 1);
+        const configName = state.payload?.configName;
         await clearState(userId);
-        await createOrder(chatId, userId, productId, paymentMethod, text.trim() || null, walletUsed);
+        if (quantity && quantity > 1 && configName) {
+            await createBulkOrders(chatId, userId, productId, paymentMethod, discountCode, walletUsed, quantity, configName);
+        }
+        else {
+            await createOrder(chatId, userId, productId, paymentMethod, discountCode, walletUsed);
+        }
         return true;
     }
     if (state.state === "await_custom_discount_code") {
@@ -4777,10 +5086,12 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
         const dataMb = Math.max(1, Math.round(Number(checkout.dataMb || 0)));
         const days = Math.max(30, Math.round(Number(checkout.days || 30)));
         const gb = Math.max(1, Math.round(dataMb / 1024));
+        const configName = String(checkout.configName || "").trim() || undefined;
         const overrides = {
             basePriceToman: totalPrice,
             panelConfigPatch: { data_limit_mb: dataMb, expire_days: days, force_awaiting_config: true },
-            productNameSuffix: `(سفارشی ${gb}GB / ${days} روز)`
+            productNameSuffix: `(سفارشی ${gb}GB / ${days} روز)`,
+            configName
         };
         await clearState(userId);
         await createOrder(chatId, userId, productId, paymentMethod, text.trim() || null, walletUsed, overrides);
@@ -4819,6 +5130,7 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
         o.plisio_txn_id,
         o.plisio_invoice_url,
         o.plisio_status,
+        o.panel_delivery_mode,
         COALESCE(o.product_name_snapshot, p.name) AS product_name,
         u.username,
         u.first_name,
@@ -4854,18 +5166,20 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
             if (o.tronado_payment_url)
                 extraLines.push(`لینک پرداخت: ${String(o.tronado_payment_url)}`);
         }
+        const cryptoDeliveryLabel = formatDeliveryModeLabel(parseDeliveryMode(String(o.panel_delivery_mode || "")));
         const caption = `رسید پرداخت کریپتو ارسال شد\n` +
             `سفارش: ${String(o.purchase_id || "-")}\n` +
             `کاربر: ${userId}\n` +
             `یوزرنیم: ${username}\n` +
             `نام: ${fullName}\n` +
             `محصول: ${String(o.product_name || "-")}\n` +
+            `تحویل: ${cryptoDeliveryLabel}\n` +
             `مبلغ: ${formatPriceToman(Number(o.final_price || 0))} تومان\n` +
             `روش پرداخت: ${method}` +
             (walletUsed > 0 ? `\nکسر از کیف پول: ${formatPriceToman(walletUsed)} تومان` : "") +
             (extraLines.length ? `\n${extraLines.join("\n")}` : "");
         await clearState(userId);
-        for (const adminId of adminIds) {
+        for (const adminId of await getAdminIds()) {
             try {
                 await tg("sendPhoto", {
                     chat_id: adminId,
@@ -4904,7 +5218,7 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
           AND telegram_id = ${userId}
           AND status = 'awaiting_receipt'
           AND payment_method = 'card2card'
-        RETURNING purchase_id, final_price, payment_method, wallet_used;
+        RETURNING purchase_id, final_price, payment_method, wallet_used, panel_delivery_mode, product_name_snapshot;
       `;
         }
         catch (e) {
@@ -4929,14 +5243,19 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
         const fullName = [firstName, lastName].filter(Boolean).join(" ").trim() || "-";
         const actualWalletUsed = Number(rows[0].wallet_used || 0);
         const walletUsedText = actualWalletUsed > 0 ? `\nکسر از کیف پول: ${formatPriceToman(actualWalletUsed)} تومان` : "";
+        const cardDeliveryMode = parseDeliveryMode(String(rows[0].panel_delivery_mode || ""));
+        const cardDeliveryLabel = formatDeliveryModeLabel(cardDeliveryMode);
+        const cardProductSnap = String(rows[0].product_name_snapshot || "").trim();
         await clearState(userId);
-        for (const adminId of adminIds) {
+        for (const adminId of await getAdminIds()) {
             try {
                 await tg("sendPhoto", {
                     chat_id: adminId,
                     photo: photoFileId,
                     caption: `رسید جدید ارسال شد\n` +
                         `سفارش: ${rows[0].purchase_id}\n` +
+                        `محصول: ${cardProductSnap || "-"}\n` +
+                        `تحویل: ${cardDeliveryLabel}\n` +
                         `کاربر: ${userId}\n` +
                         `یوزرنیم: ${username}\n` +
                         `نام: ${fullName}\n` +
@@ -4987,16 +5306,26 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
         const firstName = profileRows.length && profileRows[0].first_name ? String(profileRows[0].first_name) : "";
         const lastName = profileRows.length && profileRows[0].last_name ? String(profileRows[0].last_name) : "";
         const fullName = [firstName, lastName].filter(Boolean).join(" ").trim() || "-";
-        const cfgRows = await sql `SELECT config_value FROM inventory WHERE id = ${rows[0].inventory_id} LIMIT 1;`;
+        const cfgRows = await sql `
+      SELECT i.config_value, p.name AS product_name, p.panel_delivery_mode
+      FROM inventory i
+      INNER JOIN products p ON p.id = i.product_id
+      WHERE i.id = ${rows[0].inventory_id}
+      LIMIT 1;
+    `;
         const cfgText = String(cfgRows[0]?.config_value || "-");
+        const topupProductName = String(cfgRows[0]?.product_name || "").trim();
+        const topupDeliveryLabel = formatDeliveryModeLabel(parseDeliveryMode(String(cfgRows[0]?.panel_delivery_mode || "")));
         await clearState(userId);
-        for (const adminId of adminIds) {
+        for (const adminId of await getAdminIds()) {
             try {
                 await tg("sendPhoto", {
                     chat_id: adminId,
                     photo: photoFileId,
                     caption: `رسید جدید افزایش دیتا\n` +
                         `شماره سفارش: ${rows[0].purchase_id}\n` +
+                        `محصول: ${topupProductName || "-"}\n` +
+                        `تحویل (سرویس پایه): ${topupDeliveryLabel}\n` +
                         `کاربر: ${userId}\n` +
                         `یوزرنیم: ${username}\n` +
                         `نام: ${fullName}\n` +
@@ -6148,6 +6477,59 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
         await tg("sendMessage", { chat_id: chatId, text: `ذخیره شد ✅\nقیمت هر روز: ${formatPriceToman(n)} تومان` });
         return true;
     }
+    if (state.state === "admin_add_admin") {
+        const newAdminId = Number(text.trim());
+        if (!Number.isFinite(newAdminId) || newAdminId <= 0) {
+            await tg("sendMessage", { chat_id: chatId, text: "لطفاً یک آیدی عددی معتبر ارسال کنید." });
+            return true;
+        }
+        // Check if user exists
+        const userRows = await sql `SELECT telegram_id FROM users WHERE telegram_id = ${newAdminId} LIMIT 1;`;
+        if (!userRows.length) {
+            await tg("sendMessage", {
+                chat_id: chatId,
+                text: "⚠️ این کاربر هنوز با ربات تعاملی نداشته است.\nآیا مطمئنید می‌خواهید ادمین کنید؟ برای تایید، دوباره همین آیدی را بفرستید."
+            });
+            // Store pending admin add
+            await setState(userId, "admin_confirm_add_admin", { pendingAdminId: newAdminId });
+            return true;
+        }
+        // Add to admin_ids in settings
+        const currentSetting = (await getSetting("admin_ids")) || "";
+        const currentIds = String(currentSetting)
+            .split(/[,\s]+/)
+            .map((x) => Number(x.trim()))
+            .filter((x) => Number.isFinite(x));
+        if (!currentIds.includes(newAdminId)) {
+            currentIds.push(newAdminId);
+            await setSetting("admin_ids", currentIds.join(","));
+        }
+        await clearState(userId);
+        await tg("sendMessage", { chat_id: chatId, text: `ادمین ${newAdminId} اضافه شد ✅` });
+        return true;
+    }
+    if (state.state === "admin_confirm_add_admin") {
+        const newAdminId = Number(text.trim());
+        const pendingId = Number(state.payload?.pendingAdminId || 0);
+        if (newAdminId !== pendingId) {
+            await clearState(userId);
+            await tg("sendMessage", { chat_id: chatId, text: "آیدی با آیدی قبلی مطابقت ندارد. عملیات لغو شد." });
+            return true;
+        }
+        // Add to admin_ids in settings
+        const currentSetting = (await getSetting("admin_ids")) || "";
+        const currentIds = String(currentSetting)
+            .split(/[,\s]+/)
+            .map((x) => Number(x.trim()))
+            .filter((x) => Number.isFinite(x));
+        if (!currentIds.includes(newAdminId)) {
+            currentIds.push(newAdminId);
+            await setSetting("admin_ids", currentIds.join(","));
+        }
+        await clearState(userId);
+        await tg("sendMessage", { chat_id: chatId, text: `ادمین ${newAdminId} اضافه شد ✅` });
+        return true;
+    }
     if (state.state === "admin_ban_username") {
         const username = text.replace("@", "").trim().toLowerCase();
         if (!username) {
@@ -6445,7 +6827,11 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
         const panelUser = toJsonObject(panelMatch.panelUser) || {};
         const panelSubscriptionUrl = String(panelUser.subscription_url || panelUser.subscriptionUrl || "").trim() ||
             (String(panelMatch.panelType || "") === "sanaei" && panelUser.subId && panelMatch.panelBaseUrl
-                ? buildSanaeiSubscriptionUrl(String(panelMatch.panelBaseUrl), {}, String(panelUser.subId))
+                ? buildSanaeiSubscriptionUrl(String(panelMatch.panelBaseUrl), {}, String(panelUser.subId), {
+                    subscription_public_port: panelMatch.subscriptionPublicPort ?? undefined,
+                    subscription_public_host: panelMatch.subscriptionPublicHost ?? undefined,
+                    subscription_link_protocol: panelMatch.subscriptionLinkProtocol ?? undefined
+                })
                 : "");
         const panelRuntimeLine = String(panelMatch.panelType || "") === "marzban"
             ? `📊 مصرف: ${Number(panelUser.data_limit || 0) > 0
@@ -6869,7 +7255,7 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
             configValue: null,
             metadata: { adminId: userId, targetMb: isInfinite ? 0 : targetMb, isInfinite, panelResult: result.message }
         });
-        await tg("sendMessage", { chat_id: chatId, text: `سقف دیتای کاربر تنظیم شد ✅\nسقف جدید: ${isInfinite ? "نامحدود" : `${targetMb}MB`}` });
+        await tg("sendMessage", { chat_id: chatId, text: `سقف دیتای کاربر تنظیم شد ✅\nس��ف جدید: ${isInfinite ? "نامحدود" : `${targetMb}MB`}` });
         return true;
     }
     if (state.state === "admin_panel_set_expiry") {
@@ -7017,7 +7403,7 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
                 return true;
             }
             const panelRows = await sql `
-        SELECT id, panel_type, base_url, username, password
+        SELECT id, panel_type, base_url, username, password, subscription_public_port, subscription_public_host, subscription_link_protocol, config_public_host
         FROM panels
         WHERE id = ${panelId}
         LIMIT 1;
@@ -7206,6 +7592,105 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
         await tg("sendMessage", { chat_id: chatId, text: "کانفیگ برای کاربر ارسال شد ✅" });
         return true;
     }
+    if (state.state === "admin_panel_subport_edit") {
+        const panelId = Number(state.payload.panelId || 0);
+        if (!Number.isFinite(panelId) || panelId <= 0) {
+            await clearState(userId);
+            await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+            return true;
+        }
+        const raw = text.trim();
+        if (raw === "-") {
+            await clearState(userId);
+            await showPanelDetails(chatId, panelId, "تغییر پورت ساب لغو شد.");
+            return true;
+        }
+        const lt = raw.toLowerCase();
+        if (lt === "0" || lt === "auto") {
+            await sql `UPDATE panels SET subscription_public_port = NULL WHERE id = ${panelId}`;
+        }
+        else {
+            const n = parseMaybeNumber(raw);
+            if (n === null || n < 1 || n > 65535) {
+                await tg("sendMessage", { chat_id: chatId, text: "پورت نامعتبر است. عدد ۱ تا ۶۵۵۳۵، یا 0/auto برای خودکار." });
+                return true;
+            }
+            await sql `UPDATE panels SET subscription_public_port = ${n} WHERE id = ${panelId}`;
+        }
+        await clearState(userId);
+        await showPanelDetails(chatId, panelId, "پورت لینک ساب ذخیره شد ✅");
+        return true;
+    }
+    if (state.state === "admin_panel_suburl_host_edit") {
+        const panelId = Number(state.payload.panelId || 0);
+        if (!Number.isFinite(panelId) || panelId <= 0) {
+            await clearState(userId);
+            await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+            return true;
+        }
+        const raw = text.trim();
+        if (raw === "-") {
+            await clearState(userId);
+            await showPanelDetails(chatId, panelId, "تنظیم دامنه لینک ساب لغو شد.");
+            return true;
+        }
+        const protoRaw = state.payload.subscriptionLinkProtocol;
+        const protocolSql = protoRaw === "http" || protoRaw === "https" ? String(protoRaw) : null;
+        const lt = raw.toLowerCase();
+        let subscriptionPublicHost = null;
+        if (lt !== "0" && lt !== "auto") {
+            const h = sanitizeSubscriptionPublicHostInput(raw);
+            if (!h) {
+                await tg("sendMessage", {
+                    chat_id: chatId,
+                    text: "نام میزبان معتبر نیست. مثال: sub.example.com\nیا https://sub.example.com\n0 یا auto = همان میزبان آدرس پنل"
+                });
+                return true;
+            }
+            subscriptionPublicHost = h;
+        }
+        await sql `
+      UPDATE panels
+      SET subscription_public_host = ${subscriptionPublicHost},
+          subscription_link_protocol = ${protocolSql}
+      WHERE id = ${panelId}
+    `;
+        await clearState(userId);
+        await showPanelDetails(chatId, panelId, "دامنه و پروتکل لینک ساب ذخیره شد ✅");
+        return true;
+    }
+    if (state.state === "admin_panel_confighost_edit") {
+        const panelId = Number(state.payload.panelId || 0);
+        if (!Number.isFinite(panelId) || panelId <= 0) {
+            await clearState(userId);
+            await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+            return true;
+        }
+        const raw = text.trim();
+        if (raw === "-") {
+            await clearState(userId);
+            await showPanelDetails(chatId, panelId, "تنظیم دامنه کانفیگ لغو شد.");
+            return true;
+        }
+        const lt = raw.toLowerCase();
+        if (lt === "0" || lt === "auto") {
+            await sql `UPDATE panels SET config_public_host = NULL WHERE id = ${panelId}`;
+        }
+        else {
+            const h = sanitizeSubscriptionPublicHostInput(raw);
+            if (!h) {
+                await tg("sendMessage", {
+                    chat_id: chatId,
+                    text: "نام میزبان معتبر نیست. مثال: v-panel.example.com\n0 یا auto = تشخیص خودکار\n- = انصراف"
+                });
+                return true;
+            }
+            await sql `UPDATE panels SET config_public_host = ${h} WHERE id = ${panelId}`;
+        }
+        await clearState(userId);
+        await showPanelDetails(chatId, panelId, "دامنه نمایش در کانفیگ ذخیره شد ✅");
+        return true;
+    }
     if (state.state === "admin_panel_wizard") {
         const mode = String(state.payload.mode || "add");
         const step = String(state.payload.step || "name");
@@ -7275,13 +7760,26 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
                 await tg("sendMessage", { chat_id: chatId, text: "رمز عبور پنل الزامی است." });
                 return true;
             }
+            if (panelType === "sanaei") {
+                const payload = { ...state.payload, step: "sub_port", password };
+                await setState(userId, "admin_panel_wizard", payload);
+                await promptPanelWizardStep(chatId, payload);
+                return true;
+            }
             try {
                 if (mode === "add") {
                     await sql `
-            INSERT INTO panels (name, panel_type, base_url, username, password)
-            VALUES (${name}, ${panelType}, ${baseUrl}, ${username}, ${password})
+            INSERT INTO panels (name, panel_type, base_url, username, password, subscription_public_port)
+            VALUES (${name}, ${panelType}, ${baseUrl}, ${username}, ${password}, NULL)
             ON CONFLICT (name) DO UPDATE
-            SET panel_type = EXCLUDED.panel_type, base_url = EXCLUDED.base_url, username = EXCLUDED.username, password = EXCLUDED.password;
+            SET panel_type = EXCLUDED.panel_type,
+                base_url = EXCLUDED.base_url,
+                username = EXCLUDED.username,
+                password = EXCLUDED.password,
+                subscription_public_port = panels.subscription_public_port,
+                subscription_public_host = panels.subscription_public_host,
+                subscription_link_protocol = panels.subscription_link_protocol,
+                config_public_host = panels.config_public_host;
           `;
                     const idRows = await sql `SELECT id FROM panels WHERE name = ${name} LIMIT 1;`;
                     await clearState(userId);
@@ -7303,6 +7801,99 @@ async function parseAndApplyState(chatId, userId, text, photoFileId, stickerFile
                 await sql `
           UPDATE panels
           SET name = ${name}, panel_type = ${panelType}, base_url = ${baseUrl}, username = ${username}, password = ${password}
+          WHERE id = ${panelId};
+        `;
+                await clearState(userId);
+                const test = await testPanelConnection(panelId);
+                logInfo("panel_updated", { panelId, panelType, name, baseUrl, testOk: test.ok });
+                await showPanelDetails(chatId, panelId, `اطلاعات پنل بروزرسانی شد ✅\n${test.message}`);
+                return true;
+            }
+            catch (error) {
+                await clearState(userId);
+                if (mode === "add") {
+                    logError("panel_save_failed", error, { panelType, name, baseUrl, userId });
+                    await tg("sendMessage", {
+                        chat_id: chatId,
+                        text: `ذخیره پنل انجام نشد.\n${String(error.message || error)}`
+                    });
+                    return true;
+                }
+                logError("panel_update_failed", error, { panelId, panelType, name, baseUrl, userId });
+                await tg("sendMessage", {
+                    chat_id: chatId,
+                    text: `بروزرسانی پنل انجام نشد.\n${String(error.message || error)}`
+                });
+                return true;
+            }
+        }
+        if (step === "sub_port") {
+            if (panelType !== "sanaei") {
+                await clearState(userId);
+                await tg("sendMessage", { chat_id: chatId, text: "مرحله پورت ساب فقط برای Sanaei معتبر است." });
+                return true;
+            }
+            const name = String(state.payload.name || "");
+            const baseUrl = String(state.payload.baseUrl || "");
+            const username = String(state.payload.username || "");
+            const password = String(state.payload.password || "");
+            const lt = raw.trim().toLowerCase();
+            let subscriptionPublicPort = null;
+            if (mode === "edit" && raw === "-") {
+                subscriptionPublicPort = parseMaybeNumber(state.payload.subscriptionPublicPort);
+            }
+            else if (raw === "" || lt === "0" || lt === "auto") {
+                subscriptionPublicPort = null;
+            }
+            else {
+                const n = parseMaybeNumber(raw);
+                if (n === null || n < 1 || n > 65535) {
+                    await tg("sendMessage", { chat_id: chatId, text: "پورت نامعتبر است. عدد ۱ تا ۶۵۵۳۵، یا 0/auto برای خودکار." });
+                    return true;
+                }
+                subscriptionPublicPort = n;
+            }
+            try {
+                if (mode === "add") {
+                    await sql `
+            INSERT INTO panels (name, panel_type, base_url, username, password, subscription_public_port)
+            VALUES (${name}, ${panelType}, ${baseUrl}, ${username}, ${password}, ${subscriptionPublicPort})
+            ON CONFLICT (name) DO UPDATE
+            SET panel_type = EXCLUDED.panel_type,
+                base_url = EXCLUDED.base_url,
+                username = EXCLUDED.username,
+                password = EXCLUDED.password,
+                subscription_public_port = EXCLUDED.subscription_public_port,
+                subscription_public_host = panels.subscription_public_host,
+                subscription_link_protocol = panels.subscription_link_protocol,
+                config_public_host = panels.config_public_host;
+          `;
+                    const idRows = await sql `SELECT id FROM panels WHERE name = ${name} LIMIT 1;`;
+                    await clearState(userId);
+                    if (!idRows.length) {
+                        await tg("sendMessage", { chat_id: chatId, text: "پنل ذخیره شد ✅" });
+                        return true;
+                    }
+                    const savedPanelId = Number(idRows[0].id);
+                    const test = await testPanelConnection(savedPanelId);
+                    logInfo("panel_saved", { panelId: savedPanelId, panelType, name, baseUrl, testOk: test.ok });
+                    await showPanelDetails(chatId, savedPanelId, `پنل ذخیره شد ✅\n${test.message}`);
+                    return true;
+                }
+                if (!Number.isFinite(panelId) || panelId <= 0) {
+                    await clearState(userId);
+                    await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل معتبر نیست." });
+                    return true;
+                }
+                await sql `
+          UPDATE panels
+          SET
+            name = ${name},
+            panel_type = ${panelType},
+            base_url = ${baseUrl},
+            username = ${username},
+            password = ${password},
+            subscription_public_port = ${subscriptionPublicPort}
           WHERE id = ${panelId};
         `;
                 await clearState(userId);
@@ -7538,7 +8129,7 @@ async function insertOrderRecord(input) {
         INSERT INTO orders
         (
           purchase_id, telegram_id, product_id, product_name_snapshot, sell_mode, source_panel_id, panel_delivery_mode, panel_config_snapshot,
-          payment_method, card_id, discount_code, discount_amount, final_price, tron_amount, status, wallet_used,
+          payment_method, card_id, discount_code, discount_amount, final_price, tron_amount, status, wallet_used, config_name,
           tronado_token, tronado_payment_url,
           plisio_txn_id, plisio_invoice_url, plisio_status,
           crypto_wallet_id, crypto_currency, crypto_network, crypto_address, crypto_amount, crypto_expires_at,
@@ -7547,7 +8138,7 @@ async function insertOrderRecord(input) {
         SELECT
           ${input.purchaseId}, telegram_id, ${input.productId}, ${input.productNameSnapshot}, ${input.sellMode}, ${input.sourcePanelId}, ${input.panelDeliveryMode},
           ${panelConfigJson}::jsonb,
-          ${input.paymentMethod}, ${input.cardId ?? null}, ${input.discountCode}, ${discountAmount}, ${finalPrice}, ${tronAmount}, ${input.status}, ${walletUsed},
+          ${input.paymentMethod}, ${input.cardId ?? null}, ${input.discountCode}, ${discountAmount}, ${finalPrice}, ${tronAmount}, ${input.status}, ${walletUsed}, ${input.configName ?? null},
           ${input.tronadoToken ?? null}, ${input.tronadoPaymentUrl ?? null},
           ${input.plisioTxnId ?? null}, ${input.plisioInvoiceUrl ?? null}, ${input.plisioStatus ?? null},
           ${input.cryptoWalletId ?? null}, ${input.cryptoCurrency ?? null}, ${input.cryptoNetwork ?? null}, ${input.cryptoAddress ?? null}, ${input.cryptoAmount ?? null}, ${input.cryptoExpiresAt ?? null},
@@ -7573,7 +8164,7 @@ async function insertOrderRecord(input) {
     INSERT INTO orders
     (
       purchase_id, telegram_id, product_id, product_name_snapshot, sell_mode, source_panel_id, panel_delivery_mode, panel_config_snapshot,
-      payment_method, card_id, discount_code, discount_amount, final_price, tron_amount, status, wallet_used,
+      payment_method, card_id, discount_code, discount_amount, final_price, tron_amount, status, wallet_used, config_name,
       tronado_token, tronado_payment_url,
       plisio_txn_id, plisio_invoice_url, plisio_status,
       crypto_wallet_id, crypto_currency, crypto_network, crypto_address, crypto_amount, crypto_expires_at,
@@ -7583,7 +8174,7 @@ async function insertOrderRecord(input) {
     (
       ${input.purchaseId}, ${input.telegramId}, ${input.productId}, ${input.productNameSnapshot}, ${input.sellMode}, ${input.sourcePanelId}, ${input.panelDeliveryMode},
       ${panelConfigJson}::jsonb,
-      ${input.paymentMethod}, ${input.cardId ?? null}, ${input.discountCode}, ${discountAmount}, ${finalPrice}, ${tronAmount}, ${input.status}, ${walletUsed},
+      ${input.paymentMethod}, ${input.cardId ?? null}, ${input.discountCode}, ${discountAmount}, ${finalPrice}, ${tronAmount}, ${input.status}, ${walletUsed}, ${input.configName ?? null},
       ${input.tronadoToken ?? null}, ${input.tronadoPaymentUrl ?? null},
       ${input.plisioTxnId ?? null}, ${input.plisioInvoiceUrl ?? null}, ${input.plisioStatus ?? null},
       ${input.cryptoWalletId ?? null}, ${input.cryptoCurrency ?? null}, ${input.cryptoNetwork ?? null}, ${input.cryptoAddress ?? null}, ${input.cryptoAmount ?? null}, ${input.cryptoExpiresAt ?? null},
@@ -7599,7 +8190,7 @@ async function insertOrderRecord(input) {
 async function refundWalletUsage(telegramId, amount, description) {
     const safeAmount = Math.max(0, Math.round(Number(amount || 0)));
     if (!safeAmount)
-        return;
+        return null;
     await sql `
     WITH refunded AS (
       UPDATE users
@@ -7666,7 +8257,7 @@ async function sendDeliveryPackage(chatId, purchaseId, fallbackConfigValue, deli
     const firstConfig = configLinks.length ? configLinks[0] : fallbackConfigValue || "";
     const finalKeyboard = keyboard.map((row) => [...row]);
     if (hasManyConfigs && purchaseId && purchaseId !== "-") {
-        finalKeyboard.unshift([{ text: "📃 نمایش بقیه کانفیگ‌ها", callback_data: `show_configs_${purchaseId}_1` }]);
+        finalKeyboard.unshift([{ text: "📃 نمایش بقی�� کانفیگ‌ها", callback_data: `show_configs_${purchaseId}_1` }]);
     }
     const captionLines = [
         prefixText ? prefixText : null,
@@ -7683,7 +8274,7 @@ async function sendDeliveryPackage(chatId, purchaseId, fallbackConfigValue, deli
             text: escapeHtml(captionLines.join("\n\n")),
             reply_markup: { inline_keyboard: finalKeyboard }
         });
-        return;
+        return null;
     }
     await tg("sendPhoto", {
         chat_id: chatId,
@@ -7725,7 +8316,7 @@ async function createTopupCard2CardRequest(chatId, userId, inventoryId, mb) {
   `;
     if (!ownRows.length || !Number.isFinite(mb) || mb <= 0) {
         await tg("sendMessage", { chat_id: chatId, text: "درخواست معتبر نیست." });
-        return;
+        return null;
     }
     const rateSetting = await getSetting("topup_price_per_gb_toman");
     const defaultRate = Math.max(1, Math.round((Number(ownRows[0].price_toman || 500000) * 1024) / Math.max(1, Number(ownRows[0].size_mb || 1024))));
@@ -7734,7 +8325,7 @@ async function createTopupCard2CardRequest(chatId, userId, inventoryId, mb) {
     const cards = await sql `SELECT id, label, card_number, holder_name, bank_name FROM cards WHERE active = TRUE ORDER BY id ASC;`;
     if (!cards.length) {
         await tg("sendMessage", { chat_id: chatId, text: "فعلاً کارت فعالی برای پرداخت کارت‌به‌کارت ثبت نشده است." });
-        return;
+        return null;
     }
     const randomMode = await getBoolSetting("random_card_distribution", false);
     const mainCardRaw = await getSetting("main_card_id");
@@ -8279,6 +8870,60 @@ async function tryAutoApplyPanelTopup(topupRequestId, doneBy) {
     });
     return { ok: true, message: result.message };
 }
+async function generateUniqueConfigName(baseName, userId, quantity, index) {
+    // For single item, use base name directly (or with random if duplicate)
+    // For bulk: config1_1, config1_2, etc.
+    let name = quantity === 1 ? baseName : `${baseName}_${index}`;
+    // Check if this exact name exists for this user
+    const existing = await sql `
+  SELECT id FROM orders
+  WHERE telegram_id = ${userId} AND config_name = ${name}
+  LIMIT 1;
+  `;
+    if (existing.length > 0) {
+        // Name exists, add random number to make it unique
+        const randomNum = Math.floor(Math.random() * 10000);
+        name = `${baseName}_${randomNum}`;
+    }
+    return name;
+}
+async function createBulkOrders(chatId, userId, productId, paymentMethod, discountInput, walletUsedParam = 0, quantity = 1, baseName = "config") {
+    // Generate unique config names for the bulk order
+    const configNames = [];
+    for (let i = 1; i <= quantity; i++) {
+        const configName = await generateUniqueConfigName(baseName, userId, quantity, i);
+        configNames.push(configName);
+    }
+    // Calculate total price - get product price and multiply by quantity
+    const productRows = await sql `SELECT price_toman FROM products WHERE id = ${productId} LIMIT 1;`;
+    if (!productRows.length) {
+        await tg("sendMessage", { chat_id: chatId, text: "محصول یافت نشد." });
+        return null;
+    }
+    const unitPrice = Number(productRows[0].price_toman || 0);
+    const totalPrice = unitPrice * quantity;
+    // Create overrides with quantity info stored in panel config
+    const overrides = {
+        basePriceToman: totalPrice,
+        configName: configNames[0], // First name for the first config
+        panelConfigPatch: {
+            bulk_quantity: quantity,
+            bulk_config_names: configNames,
+            bulk_base_name: baseName
+        },
+        productNameSuffix: quantity > 1 ? `(x${quantity})` : undefined
+    };
+    // Create a single order with total price
+    const orderCreated = await createOrder(chatId, userId, productId, paymentMethod, discountInput, walletUsedParam, overrides);
+    if (!orderCreated) {
+        await tg("sendMessage", {
+            chat_id: chatId,
+            text: `❌ خطا: نتوانستیم سفارش شما را ثبت کنیم. لطفاً دوباره تلاش کنید یا از پشتیبانی کمک بگیرید.`
+        });
+        return null;
+    }
+    return orderCreated;
+}
 async function createOrder(chatId, userId, productId, paymentMethod, discountInput, walletUsedParam = 0, overrides = null) {
     const globalInfinite = await getBoolSetting("global_infinite_mode", false);
     const rows = await sql `
@@ -8314,7 +8959,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
   `;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "محصول یافت نشد." });
-        return;
+        return null;
     }
     const product = rows[0];
     const sellMode = parseSellMode(String(product.sell_mode || ""));
@@ -8322,14 +8967,15 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
     if (sellMode === "panel" &&
         (!product.panel_id || !product.panel_active || !product.panel_allow_new_sales || panelRemaining <= 0)) {
         await tg("sendMessage", { chat_id: chatId, text: "فروش از پنل برای این محصول فعلاً در دسترس نیست." });
-        return;
+        return null;
     }
     const allowNoStock = sanitizePanelConfig(overrides?.panelConfigPatch).force_awaiting_config === true;
     if (sellMode !== "panel" && !globalInfinite && !product.is_infinite && Number(product.stock) <= 0 && !allowNoStock) {
         await tg("sendMessage", { chat_id: chatId, text: "موجودی این محصول تمام شده است." });
-        return;
+        return null;
     }
     const basePriceToman = Math.max(1, Math.round(Number(overrides?.basePriceToman ?? product.price_toman)));
+    const configName = overrides?.configName ? String(overrides.configName).trim() : null;
     const basePanelConfig = sanitizePanelConfig(product.panel_config);
     const panelConfigSnapshot = overrides?.panelConfigPatch ? { ...basePanelConfig, ...sanitizePanelConfig(overrides.panelConfigPatch) } : basePanelConfig;
     const productNameSnapshot = `${String(product.name || "")}${overrides?.productNameSuffix ? ` ${overrides.productNameSuffix}` : ""}`.trim();
@@ -8341,7 +8987,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
         const walletBalance = userRows.length ? Number(userRows[0].wallet_balance || 0) : 0;
         if (walletBalance < finalPrice) {
             await tg("sendMessage", { chat_id: chatId, text: "موجودی کیف پول شما کافی نیست." });
-            return;
+            return null;
         }
         walletUsed = finalPrice;
         finalPrice = 0;
@@ -8363,7 +9009,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
         const ready = wallets.filter(cryptoWalletReady);
         if (!ready.length) {
             await tg("sendMessage", { chat_id: chatId, text: "هیچ کیف پول کریپتوی فعالی برای پرداخت تنظیم نشده است." });
-            return;
+            return null;
         }
         if (ready.length > 1) {
             await setState(userId, "await_crypto_wallet_select", { productId, discountInput, walletUsedParam, overrides });
@@ -8372,7 +9018,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                 text: "کدام کیف پول را برای پرداخت انتخاب می‌کنید؟",
                 reply_markup: { inline_keyboard: ready.slice(0, 12).map((w) => [{ text: cryptoWalletTitle(w), callback_data: `select_crypto_wallet_${w.id}` }]).concat([[homeButton()]]) }
             });
-            return;
+            return null;
         }
         cryptoWalletId = ready[0].id;
     }
@@ -8391,7 +9037,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             const tokens = await getSwapwalletAllowedTokens();
             if (!tokens.length) {
                 await tg("sendMessage", { chat_id: chatId, text: "فعلاً هیچ روش پرداختی برای SwapWallet در دسترس نیست." });
-                return;
+                return null;
             }
             await setState(userId, "await_swapwallet_asset_select", { productId, discountInput, walletUsedParam, overrides });
             await tg("sendMessage", {
@@ -8409,7 +9055,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             logError("swapwallet_allowed_tokens_failed", e, { userId, chatId });
             await tg("sendMessage", { chat_id: chatId, text: "خطا در دریافت گزینه‌های پرداخت SwapWallet." });
         }
-        return;
+        return null;
     }
     const purchaseId = `P${Date.now()}${Math.floor(Math.random() * 10000).toString().padStart(4, "0")}`;
     if (paymentMethod === "wallet") {
@@ -8430,6 +9076,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                 tronAmount: 0,
                 status: "pending",
                 walletUsed,
+                configName,
                 walletTransactionDescription: `خرید محصول ${productNameSnapshot} (سفارش ${purchaseId})`
             }));
             await tg("sendMessage", {
@@ -8445,16 +9092,16 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             const code = getOrderInsertErrorCode(error);
             if (code === "discount_unavailable") {
                 await tg("sendMessage", { chat_id: chatId, text: "کد تخفیف دیگر قابل استفاده نیست. لطفاً دوباره سفارش را ثبت کنید." });
-                return;
+                return null;
             }
             if (code === "wallet_insufficient") {
                 await tg("sendMessage", { chat_id: chatId, text: "موجودی کیف پول شما کافی نیست." });
-                return;
+                return null;
             }
             logError("create_wallet_order_failed", error, { chatId, userId, productId, purchaseId });
             await tg("sendMessage", { chat_id: chatId, text: "ساخت سفارش با خطا مواجه شد. لطفاً دوباره تلاش کنید." });
         }
-        return;
+        return null;
     }
     if (false && paymentMethod === "wallet") {
         // Atomic deduction and order insertion to prevent negative balance exploits
@@ -8479,13 +9126,14 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
     `;
         if (!inserted.length) {
             await tg("sendMessage", { chat_id: chatId, text: "موجودی کیف پول شما کافی نیست یا خطایی رخ داده است." });
-            return;
+            return null;
         }
         const negativeWalletUsed = -walletUsed;
         await sql `
       INSERT INTO wallet_transactions (telegram_id, amount, type, description, created_at)
       VALUES (${userId}, ${negativeWalletUsed}, 'purchase', ${`خرید محصول ${productNameSnapshot} (سفارش ${purchaseId})`}, NOW());
     `;
+        return purchaseId;
         const orderId = Number(inserted[0].id);
         await tg("sendMessage", {
             chat_id: chatId,
@@ -8495,13 +9143,13 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
         if (!fulfill.ok && fulfill.reason === "stock_empty") {
             await tg("sendMessage", { chat_id: chatId, text: "موجودی صفر است. ادمین پیگیری می‌کند." });
         }
-        return;
+        return null;
     }
     if (paymentMethod === "card2card") {
         const cards = await sql `SELECT id, label, card_number, holder_name, bank_name FROM cards WHERE active = TRUE ORDER BY id ASC;`;
         if (!cards.length) {
             await tg("sendMessage", { chat_id: chatId, text: "فعلاً کارت فعالی برای پرداخت کارت‌به‌کارت ثبت نشده است." });
-            return;
+            return null;
         }
         const randomMode = await getBoolSetting("random_card_distribution", false);
         const mainCardRaw = await getSetting("main_card_id");
@@ -8526,6 +9174,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                 tronAmount: 0,
                 status: "awaiting_receipt",
                 walletUsed,
+                configName,
                 walletTransactionDescription: `خرید محصول ${productNameSnapshot} (سفارش ${purchaseId})`
             }));
             await setState(userId, "await_receipt", { orderId });
@@ -8550,22 +9199,22 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             const code = getOrderInsertErrorCode(error);
             if (code === "discount_unavailable") {
                 await tg("sendMessage", { chat_id: chatId, text: "کد تخفیف دیگر قابل استفاده نیست. لطفاً دوباره سفارش را ثبت کنید." });
-                return;
+                return null;
             }
             if (code === "wallet_insufficient") {
                 await tg("sendMessage", { chat_id: chatId, text: "موجودی کیف پول شما برای ثبت این سفارش کافی نیست." });
-                return;
+                return null;
             }
             logError("create_card2card_order_failed", error, { chatId, userId, productId, purchaseId });
             await tg("sendMessage", { chat_id: chatId, text: "ساخت سفارش با خطا مواجه شد. لطفاً دوباره تلاش کنید." });
         }
-        return;
+        return null;
     }
     if (false && paymentMethod === "card2card") {
         const cards = await sql `SELECT id, label, card_number, holder_name, bank_name FROM cards WHERE active = TRUE ORDER BY id ASC;`;
         if (!cards.length) {
             await tg("sendMessage", { chat_id: chatId, text: "فعلاً کارت فعالی برای پرداخت کارت‌به‌کارت ثبت نشده است." });
-            return;
+            return null;
         }
         const randomMode = await getBoolSetting("random_card_distribution", false);
         const mainCardRaw = await getSetting("main_card_id");
@@ -8603,12 +9252,12 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                 inline_keyboard: [[homeButton()]]
             }
         });
-        return;
+        return purchaseId;
     }
     if (paymentMethod === "crypto") {
         if (!cryptoWalletId) {
             await tg("sendMessage", { chat_id: chatId, text: "کیف پول کریپتو انتخاب نشده است." });
-            return;
+            return null;
         }
         const walletRows = await sql `
       SELECT id, currency, network, address, rate_mode, rate_toman_per_unit, extra_toman_per_unit, active
@@ -8618,12 +9267,12 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
     `;
         if (!walletRows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "کیف پول کریپتو یافت نشد." });
-            return;
+            return null;
         }
         const w = walletRows[0];
         if (!cryptoWalletReady(w)) {
             await tg("sendMessage", { chat_id: chatId, text: "کیف پول کریپتو به‌درستی تنظیم نشده یا غیرفعال است." });
-            return;
+            return null;
         }
         const expiresAt = new Date(Date.now() + 20 * 60 * 1000);
         let tomanPerUnit = 0;
@@ -8636,14 +9285,14 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
         }
         if (!Number.isFinite(tomanPerUnit) || tomanPerUnit <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "نرخ کیف پول کریپتو معتبر نیست." });
-            return;
+            return null;
         }
         const decimals = String(w.currency).toUpperCase() === "USDT" ? 2 : 5;
         const factor = 10 ** decimals;
         const cryptoAmount = Math.ceil((finalPrice / tomanPerUnit) * factor) / factor;
         if (!Number.isFinite(cryptoAmount) || cryptoAmount <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "مبلغ کریپتو معتبر نیست." });
-            return;
+            return null;
         }
         try {
             await withClaimedDiscount(discountCode, () => insertOrderRecord({
@@ -8662,6 +9311,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                 tronAmount: 0,
                 status: "pending",
                 walletUsed,
+                configName,
                 cryptoWalletId: Number(w.id),
                 cryptoCurrency: String(w.currency),
                 cryptoNetwork: String(w.network),
@@ -8675,15 +9325,15 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             const code = getOrderInsertErrorCode(error);
             if (code === "discount_unavailable") {
                 await tg("sendMessage", { chat_id: chatId, text: "کد تخفیف دیگر قابل استفاده نیست. لطفاً دوباره سفارش را ثبت کنید." });
-                return;
+                return null;
             }
             if (code === "wallet_insufficient") {
                 await tg("sendMessage", { chat_id: chatId, text: "موجودی کیف پول شما برای ثبت این سفارش کافی نیست." });
-                return;
+                return null;
             }
             logError("create_crypto_order_failed", error, { chatId, userId, productId, purchaseId, cryptoWalletId });
             await tg("sendMessage", { chat_id: chatId, text: "ساخت سفارش با خطا مواجه شد. لطفاً دوباره تلاش کنید." });
-            return;
+            return null;
         }
         const cryptoText = `سفارش شما ساخته شد ✅\n` +
             `شناسه خرید: ${purchaseId}\n` +
@@ -8705,12 +9355,12 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                 ]
             }
         });
-        return;
+        return null;
     }
     if (false && paymentMethod === "crypto") {
         if (!cryptoWalletId) {
             await tg("sendMessage", { chat_id: chatId, text: "کیف پول کریپتو انتخاب نشده است." });
-            return;
+            return null;
         }
         const walletRows = await sql `
       SELECT id, currency, network, address, rate_mode, rate_toman_per_unit, extra_toman_per_unit, active
@@ -8720,12 +9370,12 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
     `;
         if (!walletRows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "کیف پول کریپتو یافت نشد." });
-            return;
+            return null;
         }
         const w = walletRows[0];
         if (!cryptoWalletReady(w)) {
             await tg("sendMessage", { chat_id: chatId, text: "کیف پول کریپتو به‌درستی تنظیم نشده یا غیرفعال است." });
-            return;
+            return null;
         }
         const expiresAt = new Date(Date.now() + 20 * 60 * 1000);
         let tomanPerUnit = 0;
@@ -8738,14 +9388,14 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
         }
         if (!Number.isFinite(tomanPerUnit) || tomanPerUnit <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "نرخ کیف پول کریپتو معتبر نیست." });
-            return;
+            return null;
         }
         const decimals = String(w.currency).toUpperCase() === "USDT" ? 2 : 5;
         const factor = 10 ** decimals;
         const cryptoAmount = Math.ceil((finalPrice / tomanPerUnit) * factor) / factor;
         if (!Number.isFinite(cryptoAmount) || cryptoAmount <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "مبلغ کریپتو معتبر نیست." });
-            return;
+            return null;
         }
         await sql `
       INSERT INTO orders
@@ -8782,7 +9432,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                 ]
             }
         });
-        return;
+        return null;
     }
     if (paymentMethod === "swapwallet") {
         const callbackBase = await getPublicBaseUrl(env.PUBLIC_BASE_URL);
@@ -8791,7 +9441,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             await notifyAdmins(`⚠️ تنظیمات Callback Base ناقص است (SwapWallet)\nسفارش: ${purchaseId}`, {
                 inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${purchaseId}` }]]
             });
-            return;
+            return null;
         }
         const apiKey = ((await getSetting("swapwallet_api_key")) || "").trim();
         const shopUsername = ((await getSetting("swapwallet_shop_username")) || "").trim();
@@ -8800,7 +9450,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             await notifyAdmins(`⚠️ تنظیمات SwapWallet ناقص است\nسفارش: ${purchaseId}\napiKey:${apiKey ? "ok" : "missing"}\nshop:${shopUsername ? "ok" : "missing"}`, {
                 inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${purchaseId}` }]]
             });
-            return;
+            return null;
         }
         try {
             const { createSwapwalletTemporaryWalletInvoice } = await import("./swapwallet.js");
@@ -8838,6 +9488,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                 tronAmount: 0,
                 status: "pending",
                 walletUsed,
+                configName,
                 swapwalletInvoiceId: invoiceId,
                 swapwalletPaymentUrl: primaryUrl,
                 swapwalletStatus: "new",
@@ -8867,11 +9518,11 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             const code = getOrderInsertErrorCode(error);
             if (code === "discount_unavailable") {
                 await tg("sendMessage", { chat_id: chatId, text: "کد تخفیف دیگر قابل استفاده نیست. لطفاً دوباره سفارش را ثبت کنید." });
-                return;
+                return null;
             }
             if (code === "wallet_insufficient") {
                 await tg("sendMessage", { chat_id: chatId, text: "موجودی کیف پول شما برای ثبت این سفارش کافی نیست." });
-                return;
+                return null;
             }
             logError("create_swapwallet_invoice_failed", error, { chatId, userId, productId, purchaseId });
             await notifyAdmins(`❌ خطا در ساخت فاکتور SwapWallet\nسفارش: ${purchaseId}\nعلت: ${error.message || String(error)}`, {
@@ -8879,7 +9530,8 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             });
             await tg("sendMessage", { chat_id: chatId, text: "ساخت لینک پرداخت با خطا مواجه شد. لطفاً کمی بعد دوباره تلاش کنید یا به پشتیبانی پیام دهید." });
         }
-        return;
+        return purchaseId;
+        return null;
     }
     if (paymentMethod === "tetrapay") {
         const callbackBase = await getPublicBaseUrl(env.PUBLIC_BASE_URL);
@@ -8888,7 +9540,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             await notifyAdmins(`⚠️ تنظیمات Callback Base ناقص است (تتراپی)\nسفارش: ${purchaseId}`, {
                 inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${purchaseId}` }]]
             });
-            return;
+            return null;
         }
         const tetrapayApiKey = ((await getSetting("tetrapay_api_key")) || "").trim();
         if (!tetrapayApiKey) {
@@ -8896,7 +9548,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             await notifyAdmins(`⚠️ کلید تتراپی تنظیم نشده است\nسفارش: ${purchaseId}`, {
                 inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${purchaseId}` }]]
             });
-            return;
+            return null;
         }
         try {
             const { createTetrapayOrder } = await import("./tetrapay.js");
@@ -8909,7 +9561,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             });
             if (!orderRes.ok) {
                 await tg("sendMessage", { chat_id: chatId, text: `خطا در ارتباط با درگاه تتراپی: ${orderRes.message}` });
-                return;
+                return null;
             }
             await withClaimedDiscount(discountCode, () => insertOrderRecord({
                 purchaseId,
@@ -8927,6 +9579,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                 tronAmount: 0,
                 status: "pending",
                 walletUsed,
+                configName,
                 tronadoToken: orderRes.authority,
                 tronadoPaymentUrl: orderRes.paymentUrlBot,
                 walletTransactionDescription: `خرید محصول ${productNameSnapshot} (سفارش ${purchaseId})`
@@ -8945,21 +9598,22 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                     ]
                 }
             });
+            return purchaseId;
         }
         catch (error) {
             const code = getOrderInsertErrorCode(error);
             if (code === "discount_unavailable") {
                 await tg("sendMessage", { chat_id: chatId, text: "کد تخفیف دیگر قابل استفاده نیست. لطفاً دوباره سفارش را ثبت کنید." });
-                return;
+                return null;
             }
             if (code === "wallet_insufficient") {
                 await tg("sendMessage", { chat_id: chatId, text: "موجودی کیف پول شما برای ثبت این سفارش کافی نیست." });
-                return;
+                return null;
             }
             logError("create_tetrapay_order_failed", error, { chatId, userId, productId });
             await tg("sendMessage", { chat_id: chatId, text: `ساخت سفارش با خطا مواجه شد: ${String(error.message || error)}` });
         }
-        return;
+        return null;
     }
     if (paymentMethod === "plisio") {
         const callbackBase = await getPublicBaseUrl(env.PUBLIC_BASE_URL);
@@ -8968,13 +9622,13 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             await notifyAdmins(`⚠️ تنظیمات Callback Base ناقص است (Plisio)\nسفارش: ${purchaseId}`, {
                 inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${purchaseId}` }]]
             });
-            return;
+            return null;
         }
         const plisioApiKey = ((await getSetting("plisio_api_key")) || "").trim();
         if (!plisioApiKey) {
             await tg("sendMessage", { chat_id: chatId, text: "تنظیمات Plisio کامل نیست. لطفاً به پشتیبانی پیام دهید." });
             await notifyAdmins(`⚠️ تنظیمات Plisio ناقص است\nسفارش: ${purchaseId}\nکلید: ${plisioApiKey ? "ok" : "missing"}`, { inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${purchaseId}` }]] });
-            return;
+            return null;
         }
         try {
             const tomanPerUsdt = await getPlisioTomanPerUsdt();
@@ -9025,16 +9679,17 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                     ]
                 }
             });
+            return purchaseId;
         }
         catch (error) {
             const code = getOrderInsertErrorCode(error);
             if (code === "discount_unavailable") {
                 await tg("sendMessage", { chat_id: chatId, text: "کد تخفیف دیگر قابل استفاده نیست. لطفاً دوباره سفارش را ثبت کنید." });
-                return;
+                return null;
             }
             if (code === "wallet_insufficient") {
                 await tg("sendMessage", { chat_id: chatId, text: "موجودی کیف پول شما برای ثبت این سفارش کافی نیست." });
-                return;
+                return null;
             }
             logError("create_plisio_invoice_failed", error, { chatId, userId, productId, purchaseId });
             await notifyAdmins(`❌ خطا در ساخت فاکتور Plisio\nسفارش: ${purchaseId}\nعلت: ${error.message || String(error)}`, {
@@ -9042,14 +9697,14 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             });
             await tg("sendMessage", { chat_id: chatId, text: "ساخت لینک پرداخت با خطا مواجه شد. لطفاً کمی بعد دوباره تلاش کنید یا به پشتیبانی پیام دهید." });
         }
-        return;
+        return null;
     }
     try {
         const walletFromSetting = await getSetting("business_wallet_address");
         const walletAddress = walletFromSetting || env.BUSINESS_WALLET_ADDRESS;
         if (!walletAddress) {
             await tg("sendMessage", { chat_id: chatId, text: "تنظیمات کیف پول کامل نیست. لطفاً به پشتیبانی پیام دهید." });
-            return;
+            return null;
         }
         const tronadoApiKey = ((await getSetting("tronado_api_key")) || "").trim();
         const tronPriceCandidate = await getTronPriceToman(tronadoApiKey || undefined);
@@ -9071,7 +9726,7 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
             await notifyAdmins(`⚠️ تنظیمات Callback Base ناقص است (Tronado)\nسفارش: ${purchaseId}`, {
                 inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${purchaseId}` }]]
             });
-            return;
+            return null;
         }
         const token = await getOrderToken({
             paymentId: purchaseId,
@@ -9120,24 +9775,26 @@ async function createOrder(chatId, userId, productId, paymentMethod, discountInp
                 ]
             }
         });
+        return purchaseId;
     }
     catch (error) {
         const code = getOrderInsertErrorCode(error);
         if (code === "discount_unavailable") {
             await tg("sendMessage", { chat_id: chatId, text: "کد تخفیف دیگر قابل استفاده نیست. لطفاً دوباره سفارش را ثبت کنید." });
-            return;
+            return null;
         }
         if (code === "wallet_insufficient") {
             await tg("sendMessage", { chat_id: chatId, text: "موجودی کیف پول شما برای ثبت این سفارش کافی نیست." });
-            return;
+            return null;
         }
         logError("create_order_failed", error, { chatId, userId, productId, paymentMethod });
         await tg("sendMessage", { chat_id: chatId, text: `ساخت سفارش با خطا مواجه شد: ${String(error.message || error)}` });
     }
+    return null;
 }
 async function showMyConfigs(chatId, userId, forTopupFlow) {
     const rows = await sql `
-    SELECT i.id, i.config_value, i.delivery_payload, p.name, o.purchase_id
+    SELECT i.id, i.config_value, i.delivery_payload, i.panel_id, p.panel_config, p.name, o.purchase_id
     FROM inventory i
     INNER JOIN products p ON p.id = i.product_id
     LEFT JOIN orders o ON o.id = i.sold_order_id
@@ -9147,7 +9804,14 @@ async function showMyConfigs(chatId, userId, forTopupFlow) {
   `;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "شما هنوز کانفیگی خریداری نکرده‌اید." });
-        return;
+        return null;
+    }
+    const panelIds = [...new Set(rows.map((r) => Number(r.panel_id || 0)).filter((n) => n > 0))];
+    const panelById = new Map();
+    for (const pid of panelIds) {
+        const p = await getPanelById(pid);
+        if (p)
+            panelById.set(pid, p);
     }
     const keyboard = rows.map((row) => [
         {
@@ -9156,7 +9820,22 @@ async function showMyConfigs(chatId, userId, forTopupFlow) {
                 const label = payload.metadata?.label ? String(payload.metadata.label) : "";
                 const revoked = payload.metadata?.revoked === true;
                 const title = label ? `${label} (${row.name})` : String(row.name);
-                return `🔹 ${title}${revoked ? " 🚫" : ""} | سفارش ${row.purchase_id || "#-"} | ${configSummaryLine(payload)}`;
+                const isPanel = Boolean(payload.metadata?.panelType) && String(payload.metadata?.panelType || "") !== "manual";
+                const pt = String(payload.metadata?.panelType || "");
+                const pid = Number(row.panel_id || 0);
+                const productCfg = (typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : row.panel_config) ||
+                    {};
+                let hostHint = null;
+                let summaryPayload = payload;
+                if (isPanel && pt === "sanaei" && pid > 0) {
+                    const pRow = panelById.get(pid);
+                    if (pRow) {
+                        const { payload: live, outboundHost } = applyLiveSanaeiPanelOverridesToDeliveryPayload(payload, pRow, productCfg);
+                        summaryPayload = live;
+                        hostHint = outboundHost;
+                    }
+                }
+                return `🔹 ${title}${revoked ? " 🚫" : ""} | سفارش ${row.purchase_id || "#-"} | ${configSummaryLine(summaryPayload, hostHint)}`;
             })(),
             callback_data: `open_config_${row.id}${forTopupFlow ? "_t" : ""}`
         }
@@ -9185,10 +9864,11 @@ async function openMyConfig(chatId, userId, inventoryId, fromTopupFlow) {
   `;
     if (!rows.length) {
         await tg("sendMessage", { chat_id: chatId, text: "این کانفیگ برای شما نیست یا یافت نشد." });
-        return;
+        return null;
     }
     const row = rows[0];
     const delivery = parseDeliveryPayload(row.delivery_payload);
+    let displayDelivery = delivery;
     const revoked = delivery.metadata?.revoked === true;
     const isPanelConfig = Boolean(delivery.metadata?.panelType) && String(delivery.metadata?.panelType || "") !== "manual";
     const panelId = Number(row.panel_id || 0);
@@ -9220,7 +9900,7 @@ async function openMyConfig(chatId, userId, inventoryId, fromTopupFlow) {
                     const subId = String(found.client.subId || "");
                     const panelConfig = typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : row.panel_config;
                     if (subId) {
-                        panelSubLink = buildSanaeiSubscriptionUrl(String(panel.base_url), panelConfig || {}, subId).trim();
+                        panelSubLink = buildSanaeiSubscriptionUrl(String(panel.base_url), panelConfig || {}, subId, panel).trim();
                     }
                 }
                 else if (found.message !== "client_not_found") {
@@ -9228,7 +9908,10 @@ async function openMyConfig(chatId, userId, inventoryId, fromTopupFlow) {
                 }
             }
             if (!panelError) {
-                const mismatch = !foundOnPanel || (userSubLink && panelSubLink && userSubLink !== panelSubLink) || (!panelSubLink && userSubLink);
+                const linkMismatch = panelType === "sanaei" && userSubLink && panelSubLink
+                    ? !sanaeiSubscriptionUrlsMatchSubId(userSubLink, panelSubLink)
+                    : Boolean(userSubLink && panelSubLink && userSubLink !== panelSubLink);
+                const mismatch = !foundOnPanel || linkMismatch || (!panelSubLink && userSubLink);
                 if (mismatch) {
                     await sql `
             WITH
@@ -9247,7 +9930,23 @@ async function openMyConfig(chatId, userId, inventoryId, fromTopupFlow) {
             DELETE FROM inventory WHERE id = ${row.id};
           `;
                     await tg("sendMessage", { chat_id: chatId, text: "کانفیگ در پنل یافت نشد یا لینک آن تغییر کرده است. این کانفیگ از لیست شما حذف شد." });
-                    return;
+                    return null;
+                }
+                if (panelType === "sanaei" && foundOnPanel && panelSubLink) {
+                    const panelConfig = typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : row.panel_config;
+                    const { payload: live } = applyLiveSanaeiPanelOverridesToDeliveryPayload(delivery, panel, (panelConfig || {}));
+                    let primaryText = delivery.primaryText;
+                    if (delivery.subscriptionUrl && primaryText === delivery.subscriptionUrl) {
+                        primaryText = String(live.subscriptionUrl || primaryText);
+                    }
+                    else if ((delivery.configLinks || [])[0] && primaryText === (delivery.configLinks || [])[0]) {
+                        primaryText = String((live.configLinks || [])[0] || primaryText);
+                    }
+                    displayDelivery = {
+                        ...live,
+                        primaryText: primaryText || live.primaryText || delivery.primaryText
+                    };
+                    displayDelivery.primaryQr = buildQrText(displayDelivery.primaryText, displayDelivery.configLinks || [], displayDelivery.subscriptionUrl);
                 }
             }
         }
@@ -9263,10 +9962,11 @@ async function openMyConfig(chatId, userId, inventoryId, fromTopupFlow) {
     if (revoked) {
         await tg("sendMessage", { chat_id: chatId, text: "⚠️ این کانفیگ توسط ادمین غیرفعال شده است." });
     }
-    await sendDeliveryPackage(chatId, String(row.purchase_id || "-"), String(row.config_value), delivery, keyboard, `محصول: ${row.name}`);
+    await sendDeliveryPackage(chatId, String(row.purchase_id || "-"), String(row.config_value), displayDelivery, keyboard, `محصول: ${row.name}`);
 }
 async function notifyAdmins(text, replyMarkup) {
-    for (const adminId of adminIds) {
+    const ids = await getAdminIds();
+    for (const adminId of ids) {
         try {
             await tg("sendMessage", { chat_id: adminId, text, reply_markup: replyMarkup });
         }
@@ -9433,7 +10133,7 @@ export async function fulfillOrderByPaymentId(paymentId) {
                 chat_id: Number(topup.telegram_id),
                 text: `✅ پرداخت شما با موفقیت انجام شد و مبلغ ${formatPriceToman(Number(topup.amount))} تومان به کیف پول شما اضافه شد.`
             });
-            for (const adminId of adminIds) {
+            for (const adminId of await getAdminIds()) {
                 await tg("sendMessage", {
                     chat_id: adminId,
                     text: `💰 کاربر ${topup.telegram_id} مبلغ ${formatPriceToman(Number(topup.amount))} تومان از طریق ${paymentLabel} کیف پول خود را شارژ کرد.`
@@ -9502,7 +10202,7 @@ async function finalizeOrder(orderId, decidedBy) {
     const profile = await getTelegramProfileText(Number(order.telegram_id));
     if (parseSellMode(String(order.sell_mode || "")) === "panel") {
         const panelRows = await sql `
-      SELECT id, panel_type, base_url, username, password, active, allow_new_sales
+      SELECT id, panel_type, base_url, username, password, active, allow_new_sales, subscription_public_port, subscription_public_host, subscription_link_protocol, config_public_host
       FROM panels
       WHERE id = ${order.source_panel_id}
       LIMIT 1;
@@ -9513,67 +10213,101 @@ async function finalizeOrder(orderId, decidedBy) {
         }
         const panel = panelRows[0];
         const panelConfig = sanitizePanelConfig(order.panel_config_snapshot);
-        let provision;
-        try {
-            provision =
-                String(panel.panel_type) === "marzban"
-                    ? await provisionMarzbanSale(panel, order, panelConfig)
-                    : await provisionSanaeiSale(panel, order, panelConfig);
+        // Check if this is a bulk order
+        const bulkQuantity = Math.max(1, Math.round(Number(panelConfig.bulk_quantity || 1)));
+        const bulkConfigNames = Array.isArray(panelConfig.bulk_config_names) ? panelConfig.bulk_config_names : [];
+        // For bulk orders, create multiple configs
+        const allProvisions = [];
+        for (let i = 0; i < bulkQuantity; i++) {
+            const configName = bulkConfigNames[i] || String(order.config_name || "").trim() || null;
+            const orderWithName = { ...order, config_name: configName };
+            let provision;
+            try {
+                provision =
+                    String(panel.panel_type) === "marzban"
+                        ? await provisionMarzbanSale(panel, orderWithName, panelConfig)
+                        : await provisionSanaeiSale(panel, orderWithName, panelConfig);
+                allProvisions.push(provision);
+            }
+            catch (err) {
+                logError("provision_failed", err, { orderId, configIndex: i });
+                // If any provision fails, mark order as awaiting_config
+                await sql `
+          UPDATE orders
+          SET status = 'awaiting_config', paid_at = NOW(), admin_decision_by = ${decidedBy}
+          WHERE id = ${order.id} AND status = 'fulfilling';
+        `;
+                await tg("sendMessage", {
+                    chat_id: Number(order.telegram_id),
+                    text: `پرداخت شما تایید شد ✅\nمتاسفانه ارتباط با سرور برای ساخت اتوماتیک کانفیگ شما (سفارش ${order.purchase_id}) با خطا مواجه شد.\n${allProvisions.length > 0 ? `${allProvisions.length} کانفیگ ساخته شد.` : ""}\nادمین به زودی کانفیگ(های) شما را به صورت دستی تحویل خواهد داد.`
+                }).catch(() => { });
+                await notifyAdmins(`❌ خطای ساخت کانفیگ روی پنل برای سفارش ${order.purchase_id}:\n${err.message || "Unknown error"}\nتعداد کل: ${bulkQuantity}\nساخته شده: ${allProvisions.length}\nسفارش در وضعیت «نیازمند کانفیگ دستی» قرار گرفت.`, {
+                    inline_keyboard: [
+                        [{ text: "ارسال کانفیگ دستی", callback_data: `admin_provide_config_${order.id}` }],
+                        [{ text: "🔎 بررسی سفارش", callback_data: `admin_open_purchase_${String(order.purchase_id)}` }]
+                    ]
+                });
+                return { ok: false, reason: "provision_failed" };
+            }
         }
-        catch (err) {
-            logError("provision_failed", err, { orderId });
-            // If panel fails, we don't refund. The user paid (crypto or wallet or card).
-            // We mark it as 'awaiting_config' and alert the admin to provide it manually.
-            await sql `
-        UPDATE orders
-        SET status = 'awaiting_config', paid_at = NOW(), admin_decision_by = ${decidedBy}
-        WHERE id = ${order.id} AND status = 'fulfilling';
+        // All provisions successful - save to inventory
+        const allConfigLinks = [];
+        const allSubscriptionUrls = [];
+        let firstInventoryId = null;
+        for (const provision of allProvisions) {
+            const delivered = parseDeliveryPayload(provision.deliveryPayload);
+            const panelUserKey = String(delivered.metadata?.username || delivered.metadata?.email || delivered.metadata?.subId || delivered.metadata?.uuid || "").trim() || null;
+            const inserted = await sql `
+        INSERT INTO inventory (
+          product_id, panel_user_key, config_value, delivery_payload, status, owner_telegram_id, sold_order_id, panel_id, sold_at
+        )
+        VALUES (
+          ${order.product_id},
+          ${panelUserKey},
+          ${provision.configValue},
+          ${serializeDeliveryPayload(provision.deliveryPayload)}::jsonb,
+          'sold',
+          ${order.telegram_id},
+          ${order.id},
+          ${order.source_panel_id},
+          NOW()
+        )
+        RETURNING id;
       `;
-            await tg("sendMessage", {
-                chat_id: Number(order.telegram_id),
-                text: `پرداخت شما تایید شد ✅\nمتاسفانه ارتباط با سرور برای ساخت اتوماتیک کانفیگ شما (سفارش ${order.purchase_id}) با خطا مواجه شد.\nادمین به زودی کانفیگ شما را به صورت دستی تحویل خواهد داد.`
-            }).catch(() => { });
-            await notifyAdmins(`❌ خطای ساخت کانفیگ روی پنل برای سفارش ${order.purchase_id}:\n${err.message || "Unknown error"}\nسفارش در وضعیت «نیازمند کانفیگ دستی» قرار گرفت.`, {
-                inline_keyboard: [
-                    [{ text: "ارسال کانفیگ دستی", callback_data: `admin_provide_config_${order.id}` }],
-                    [{ text: "🔎 بررسی سفارش", callback_data: `admin_open_purchase_${String(order.purchase_id)}` }]
-                ]
+            if (!firstInventoryId)
+                firstInventoryId = Number(inserted[0].id);
+            await recordInventoryForensicEvent(Number(inserted[0].id), "sale_delivered", {
+                purchaseId: String(order.purchase_id),
+                by: decidedBy
             });
-            return { ok: false, reason: "provision_failed" };
+            if (provision.deliveryPayload.configLinks) {
+                allConfigLinks.push(...provision.deliveryPayload.configLinks);
+            }
+            if (provision.deliveryPayload.subscriptionUrl) {
+                allSubscriptionUrls.push(provision.deliveryPayload.subscriptionUrl);
+            }
         }
-        const delivered = parseDeliveryPayload(provision.deliveryPayload);
-        const panelUserKey = String(delivered.metadata?.username || delivered.metadata?.email || delivered.metadata?.subId || delivered.metadata?.uuid || "").trim() || null;
-        const inserted = await sql `
-      INSERT INTO inventory (
-        product_id, panel_user_key, config_value, delivery_payload, status, owner_telegram_id, sold_order_id, panel_id, sold_at
-      )
-      VALUES (
-        ${order.product_id},
-        ${panelUserKey},
-        ${provision.configValue},
-        ${serializeDeliveryPayload(provision.deliveryPayload)}::jsonb,
-        'sold',
-        ${order.telegram_id},
-        ${order.id},
-        ${order.source_panel_id},
-        NOW()
-      )
-      RETURNING id;
-    `;
         await sql `
       UPDATE orders
-      SET status = 'paid', paid_at = NOW(), inventory_id = ${inserted[0].id}, admin_decision_by = ${decidedBy}
+      SET status = 'paid', paid_at = NOW(), inventory_id = ${firstInventoryId}, admin_decision_by = ${decidedBy}
       WHERE id = ${order.id};
     `;
-        await recordInventoryForensicEvent(Number(inserted[0].id), "sale_delivered", {
-            purchaseId: String(order.purchase_id),
-            by: decidedBy
-        });
         await tg("sendMessage", {
             chat_id: Number(order.telegram_id),
-            text: "پرداخت شما تایید شد ✅"
+            text: `پرداخت شما تایید شد ✅${bulkQuantity > 1 ? `\n${bulkQuantity} کانفیگ ساخته شد.` : ""}`
         }).catch(() => { });
-        await sendDeliveryPackage(Number(order.telegram_id), String(order.purchase_id), String(provision.configValue), provision.deliveryPayload, [
+        // Create combined delivery payload for bulk
+        const combinedDelivery = {
+            configLinks: allConfigLinks,
+            subscriptionUrl: allSubscriptionUrls[0] || null,
+            primaryQr: buildQrText(allConfigLinks[0] || null, allConfigLinks, allSubscriptionUrls[0] || null),
+            primaryText: allConfigLinks[0] || allSubscriptionUrls[0] || "",
+            metadata: {
+                bulkCount: bulkQuantity,
+                allSubscriptionUrls: allSubscriptionUrls.length > 1 ? allSubscriptionUrls : undefined
+            }
+        };
+        await sendDeliveryPackage(Number(order.telegram_id), String(order.purchase_id), String(allConfigLinks[0] || allSubscriptionUrls[0] || ""), combinedDelivery, [
             [{ text: "➕ درخواست افزایش دیتا", callback_data: "topup_menu" }],
             [homeButton()]
         ]).catch((e) => logError("delivery_package_failed", e, { orderId: order.id }));
@@ -9582,8 +10316,8 @@ async function finalizeOrder(orderId, decidedBy) {
             userId: Number(order.telegram_id),
             telegramUsername: profile.username,
             telegramFullName: profile.fullName,
-            productName: String(order.product_name || "-"),
-            deliveryPayload: provision.deliveryPayload,
+            productName: String(order.product_name || "-") + (bulkQuantity > 1 ? ` (x${bulkQuantity})` : ""),
+            deliveryPayload: combinedDelivery,
             walletUsed: Number(order.wallet_used || 0)
         }), { inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${String(order.purchase_id)}` }]] });
         return { ok: true, reason: "fulfilled" };
@@ -9643,7 +10377,7 @@ async function finalizeOrder(orderId, decidedBy) {
         text: "پرداخت شما تایید شد ✅"
     }).catch(() => { });
     await sendDeliveryPackage(Number(order.telegram_id), String(order.purchase_id), String(allocated[0].config_value), { configLinks: [String(allocated[0].config_value)] }, [
-        [{ text: "➕ درخواست افزایش دیتا", callback_data: "topup_menu" }],
+        [{ text: "➕ ��رخواست افزایش دیتا", callback_data: "topup_menu" }],
         [homeButton()]
     ]).catch((e) => logError("delivery_package_failed", e, { orderId: order.id }));
     await notifyAdmins(buildAdminDeliverySummary({
@@ -9659,7 +10393,7 @@ async function finalizeOrder(orderId, decidedBy) {
 }
 async function handleCallback(update) {
     if (!update?.data || !update.message)
-        return;
+        return null;
     const data = update.data;
     const userId = update.from.id;
     const chatId = update.message.chat.id;
@@ -9668,14 +10402,14 @@ async function handleCallback(update) {
         await tg("answerCallbackQuery", { callback_query_id: update.id }).catch(() => { });
     }
     if (data.startsWith("noop_")) {
-        return;
+        return null;
     }
     if (await isBanned(userId)) {
         await tg("sendMessage", { chat_id: chatId, text: "دسترسی شما به دلیل تخلف مسدود شده است." });
-        return;
+        return null;
     }
     if (data !== "check_membership" && !(await checkMandatoryChannels(userId, chatId))) {
-        return;
+        return null;
     }
     if (data === "check_membership") {
         const isMember = await checkMandatoryChannels(userId, chatId, true);
@@ -9694,43 +10428,43 @@ async function handleCallback(update) {
         else {
             await tg("answerCallbackQuery", { callback_query_id: update.id, text: "هنوز در همه کانال‌ها عضو نشده‌اید!", show_alert: true }).catch(() => { });
         }
-        return;
+        return null;
     }
     await maybeQualifyReferralUser(userId);
     if (data === "home") {
         await clearState(userId);
         await sendMainMenu(chatId, userId);
-        return;
+        return null;
     }
     if (data === "wallet_menu") {
         await clearState(userId);
         await sendWalletMenu(chatId, userId);
-        return;
+        return null;
     }
     if (data === "wallet_transactions") {
         await clearState(userId);
         await showWalletTransactions(chatId, userId);
-        return;
+        return null;
     }
     if (data === "referral_menu") {
         await clearState(userId);
         await sendReferralMenu(chatId, userId);
-        return;
+        return null;
     }
     if (data === "referral_invitees") {
         await clearState(userId);
         await showReferralInvitees(chatId, userId);
-        return;
+        return null;
     }
     if (data === "referral_rewards_history") {
         await clearState(userId);
         await showReferralRewardHistory(chatId, userId);
-        return;
+        return null;
     }
     if (data === "referral_claim_help") {
         await clearState(userId);
         await sendReferralClaimHelp(chatId);
-        return;
+        return null;
     }
     if (data === "wallet_charge") {
         await setState(userId, "await_wallet_charge_amount");
@@ -9739,13 +10473,13 @@ async function handleCallback(update) {
             text: "مبلغ شارژ را به تومان ارسال کنید.\nمثال: 50000",
             reply_markup: { inline_keyboard: [[backButton("wallet_menu")]] }
         });
-        return;
+        return null;
     }
     if (data.startsWith("wallet_charge_method_")) {
         const method = data.replace("wallet_charge_method_", "");
         const state = await getState(userId);
         if (!state || state.state !== "await_wallet_charge_method")
-            return;
+            return null;
         const amount = Number(state.payload.amount);
         if (method === "tronado") {
             const rows = await sql `
@@ -9759,7 +10493,7 @@ async function handleCallback(update) {
                 const walletAddress = walletFromSetting || env.BUSINESS_WALLET_ADDRESS;
                 if (!walletAddress) {
                     await tg("sendMessage", { chat_id: chatId, text: "تنظیمات کیف پول کامل نیست. لطفاً به پشتیبانی پیام دهید." });
-                    return;
+                    return null;
                 }
                 const tronadoApiKey = ((await getSetting("tronado_api_key")) || "").trim();
                 const tronPrice = await getTronPriceToman(tronadoApiKey || undefined);
@@ -9767,7 +10501,7 @@ async function handleCallback(update) {
                 const callbackBase = await getPublicBaseUrl(env.PUBLIC_BASE_URL);
                 if (!callbackBase) {
                     await tg("sendMessage", { chat_id: chatId, text: "آدرس سایت برای Callback تنظیم نشده است. لطفاً به پشتیبانی پیام دهید." });
-                    return;
+                    return null;
                 }
                 const paymentId = `W${Date.now()}${Math.floor(Math.random() * 10000).toString().padStart(4, "0")}`;
                 const tokenData = await getOrderToken({
@@ -9795,12 +10529,12 @@ async function handleCallback(update) {
                 const callbackBase = await getPublicBaseUrl(env.PUBLIC_BASE_URL);
                 if (!callbackBase) {
                     await tg("sendMessage", { chat_id: chatId, text: "آدرس سایت برای Callback تنظیم نشده است. لطفاً به پشتیبانی پیام دهید." });
-                    return;
+                    return null;
                 }
                 const tetrapayApiKey = ((await getSetting("tetrapay_api_key")) || "").trim();
                 if (!tetrapayApiKey) {
                     await tg("sendMessage", { chat_id: chatId, text: "کلید تتراپی تنظیم نشده است. لطفاً به پشتیبانی پیام دهید." });
-                    return;
+                    return null;
                 }
                 const paymentId = `W${Date.now()}${Math.floor(Math.random() * 10000).toString().padStart(4, "0")}`;
                 const { createTetrapayOrder } = await import("./tetrapay.js");
@@ -9813,7 +10547,7 @@ async function handleCallback(update) {
                 });
                 if (!orderRes.ok) {
                     await tg("sendMessage", { chat_id: chatId, text: `خطا در ارتباط با درگاه تتراپی: ${orderRes.message}` });
-                    return;
+                    return null;
                 }
                 await sql `
           INSERT INTO wallet_topups (telegram_id, amount, payment_method, receipt_file_id)
@@ -9841,12 +10575,12 @@ async function handleCallback(update) {
                 const callbackBase = await getPublicBaseUrl(env.PUBLIC_BASE_URL);
                 if (!callbackBase) {
                     await tg("sendMessage", { chat_id: chatId, text: "آدرس سایت برای Callback تنظیم نشده است. لطفاً به پشتیبانی پیام دهید." });
-                    return;
+                    return null;
                 }
                 const plisioApiKey = ((await getSetting("plisio_api_key")) || "").trim();
                 if (!plisioApiKey) {
                     await tg("sendMessage", { chat_id: chatId, text: "تنظیمات Plisio کامل نیست. لطفاً به پشتیبانی پیام دهید." });
-                    return;
+                    return null;
                 }
                 const paymentId = `W${Date.now()}${Math.floor(Math.random() * 10000).toString().padStart(4, "0")}`;
                 const tomanPerUsdt = await getPlisioTomanPerUsdt();
@@ -9881,7 +10615,7 @@ async function handleCallback(update) {
             const ready = wallets.filter(cryptoWalletReady);
             if (!ready.length) {
                 await tg("sendMessage", { chat_id: chatId, text: "هیچ کیف پول کریپتوی فعالی برای شارژ کیف پول تنظیم نشده است." });
-                return;
+                return null;
             }
             if (ready.length > 1) {
                 await setState(userId, "await_wallet_charge_crypto_wallet_select", { amount });
@@ -9895,7 +10629,7 @@ async function handleCallback(update) {
                             .concat([[backButton("wallet_menu", "🔙 بازگشت")]])
                     }
                 });
-                return;
+                return null;
             }
             await createCryptoWalletTopup(chatId, userId, amount, ready[0]);
         }
@@ -9903,7 +10637,7 @@ async function handleCallback(update) {
             const cards = await sql `SELECT card_number, holder_name, bank_name FROM cards WHERE active = TRUE;`;
             if (!cards.length) {
                 await tg("sendMessage", { chat_id: chatId, text: "هیچ کارتی برای کارت‌به‌کارت تنظیم نشده است." });
-                return;
+                return null;
             }
             const rows = await sql `
         INSERT INTO wallet_topups (telegram_id, amount, payment_method)
@@ -9923,13 +10657,13 @@ async function handleCallback(update) {
         else {
             await tg("sendMessage", { chat_id: chatId, text: "این روش پرداخت برای شارژ کیف پول پشتیبانی نمی‌شود." });
         }
-        return;
+        return null;
     }
     if (data.startsWith("wallet_charge_crypto_wallet_")) {
         const walletId = Number(data.replace("wallet_charge_crypto_wallet_", ""));
         const state = await getState(userId);
         if (!state || state.state !== "await_wallet_charge_crypto_wallet_select")
-            return;
+            return null;
         const amount = Number(state.payload.amount);
         const walletRows = await sql `
       SELECT id, currency, network, address, rate_mode, rate_toman_per_unit, extra_toman_per_unit, active
@@ -9939,43 +10673,71 @@ async function handleCallback(update) {
     `;
         if (!walletRows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "کیف پول کریپتو یافت نشد." });
-            return;
+            return null;
         }
         const w = walletRows[0];
         if (!cryptoWalletReady(w)) {
             await tg("sendMessage", { chat_id: chatId, text: "کیف پول کریپتو به‌درستی تنظیم نشده یا غیرفعال است." });
-            return;
+            return null;
         }
         await createCryptoWalletTopup(chatId, userId, amount, w);
-        return;
+        return null;
     }
     if (data === "buy_menu") {
         await showProducts(chatId, true);
-        return;
+        return null;
     }
     if (data.startsWith("buy_custom_v2ray_")) {
         const productId = Number(data.replace("buy_custom_v2ray_", ""));
         await clearState(userId);
         await startCustomV2rayWizard(chatId, userId, productId);
-        return;
+        return null;
     }
     if (data.startsWith("buy_product_")) {
         const productId = Number(data.replace("buy_product_", ""));
-        const userRows = await sql `SELECT wallet_balance FROM users WHERE telegram_id = ${userId} LIMIT 1;`;
-        const walletBalance = userRows.length ? Number(userRows[0].wallet_balance || 0) : 0;
-        if (walletBalance > 0) {
-            await showWalletUsagePrompt(chatId, userId, productId, walletBalance);
+        await setState(userId, "await_bulk_quantity", { productId });
+        const quantityKeyboard = [
+            [cb("1️⃣ 1 عدد", "bulk_qty_1"), cb("2️⃣ 2 عدد", "bulk_qty_2"), cb("3️⃣ 3 عدد", "bulk_qty_3")],
+            [cb("4️⃣ 4 عدد", "bulk_qty_4"), cb("5️⃣ 5 عدد", "bulk_qty_5"), cb("➕ سفارشی", "bulk_qty_custom")],
+            [homeButton()]
+        ];
+        await tg("sendMessage", {
+            chat_id: chatId,
+            text: "چند عدد از این محصول می‌خواهید؟",
+            reply_markup: { inline_keyboard: quantityKeyboard }
+        });
+        return null;
+    }
+    if (data.startsWith("bulk_qty_")) {
+        const state = await getState(userId);
+        if (!state || state.state !== "await_bulk_quantity")
+            return null;
+        const qtyStr = data.replace("bulk_qty_", "");
+        let quantity = 1;
+        if (qtyStr === "custom") {
+            await tg("sendMessage", { chat_id: chatId, text: "تعداد مورد نظر را وارد کنید (1-100):" });
+            return null;
         }
         else {
-            await showPaymentMethods(chatId, userId, productId, 0);
+            quantity = Number(qtyStr);
         }
-        return;
+        if (quantity < 1 || quantity > 100) {
+            await tg("sendMessage", { chat_id: chatId, text: "تعداد باید بین 1 تا 100 باشد." });
+            return null;
+        }
+        const productId = Number(state.payload?.productId || 0);
+        await setState(userId, "await_config_name", { productId, quantity });
+        await tg("sendMessage", {
+            chat_id: chatId,
+            text: `برای ${quantity} عدد${quantity > 1 ? " از" : ""} محصول یک نام انتخاب کنید:\n(اگر نام تکراری باشد، عدد تصادفی اضافه می‌شود)\n\nمثال: config1, myVPN, etc`
+        });
+        return null;
     }
     if (data === "custom_v2ray_inc_data" || data === "custom_v2ray_dec_data" || data === "custom_v2ray_inc_days" || data === "custom_v2ray_dec_days") {
         try {
             const state = await getState(userId);
             if (!state || state.state !== "custom_v2ray_wizard")
-                return;
+                return null;
             const p = state.payload || {};
             const baseMb = Math.max(1, Math.round(Number(p.baseMb || 0)));
             const baseDays = Math.max(30, Math.round(Number(p.baseDays || 30)));
@@ -10000,29 +10762,32 @@ async function handleCallback(update) {
             logError("custom_v2ray_adjust_failed", e, { userId, chatId, data });
             await tg("sendMessage", { chat_id: chatId, text: "خطا در بروزرسانی فاکتور." });
         }
-        return;
+        return null;
     }
     if (data === "custom_v2ray_confirm") {
         try {
             const checkout = await computeCustomV2rayCheckout(userId);
             if (!checkout)
-                return;
+                return null;
             await clearState(userId);
-            await setState(userId, "custom_v2ray_checkout", checkout);
-            await showCustomWalletUsagePrompt(chatId, userId, checkout.totalPrice);
+            await setState(userId, "await_custom_v2ray_name", { checkout });
+            await tg("sendMessage", {
+                chat_id: chatId,
+                text: "لطفاً یک نام برای کانفیگ خود انتخاب کنید:\n(اگر نام تکراری باشد، عدد تصادفی اضافه می‌شود)\n\nمثال: myVPN, config1, etc"
+            });
         }
         catch (e) {
             logError("custom_v2ray_confirm_failed", e, { userId, chatId });
             await tg("sendMessage", { chat_id: chatId, text: "خطا در ادامه پرداخت." });
         }
-        return;
+        return null;
     }
     if (data === "custom_v2ray_use_wallet_custom") {
         try {
             const state = await getState(userId);
             if (!state || state.state !== "custom_v2ray_checkout") {
                 await tg("sendMessage", { chat_id: chatId, text: "جلسه سفارش سفارشی منقضی شده. دوباره از اول شروع کن." });
-                return;
+                return null;
             }
             await setState(userId, "await_custom_wallet_amount", { checkout: state.payload });
             await tg("sendMessage", { chat_id: chatId, text: "مبلغی که می‌خواهی از کیف پول کسر شود را به تومان وارد کن (فقط عدد):" });
@@ -10031,7 +10796,7 @@ async function handleCallback(update) {
             logError("custom_v2ray_wallet_custom_failed", e, { userId, chatId });
             await tg("sendMessage", { chat_id: chatId, text: "خطا در انتخاب کیف پول." });
         }
-        return;
+        return null;
     }
     if (data.startsWith("custom_v2ray_use_wallet_")) {
         try {
@@ -10039,7 +10804,7 @@ async function handleCallback(update) {
             const state = await getState(userId);
             if (!state || state.state !== "custom_v2ray_checkout") {
                 await tg("sendMessage", { chat_id: chatId, text: "جلسه سفارش سفارشی منقضی شده. دوباره از اول شروع کن." });
-                return;
+                return null;
             }
             const totalPrice = Math.max(1, Math.round(Number(state.payload.totalPrice || 0)));
             await showCustomPaymentMethods(chatId, userId, totalPrice, Math.max(0, Math.round(amount)));
@@ -10048,7 +10813,7 @@ async function handleCallback(update) {
             logError("custom_v2ray_wallet_pick_failed", e, { userId, chatId });
             await tg("sendMessage", { chat_id: chatId, text: "خطا در انتخاب کیف پول." });
         }
-        return;
+        return null;
     }
     if (data.startsWith("custom_v2ray_select_pay_")) {
         try {
@@ -10059,7 +10824,7 @@ async function handleCallback(update) {
             const state = await getState(userId);
             if (!state || state.state !== "custom_v2ray_checkout") {
                 await tg("sendMessage", { chat_id: chatId, text: "جلسه سفارش سفارشی منقضی شده. دوباره از اول شروع کن." });
-                return;
+                return null;
             }
             await showDiscountChoiceCustom(chatId, Number(state.payload.productId || 0), method, walletUsed);
         }
@@ -10067,7 +10832,7 @@ async function handleCallback(update) {
             logError("custom_v2ray_select_pay_failed", e, { userId, chatId, data });
             await tg("sendMessage", { chat_id: chatId, text: "خطا در انتخاب روش پرداخت." });
         }
-        return;
+        return null;
     }
     if (data.startsWith("custom_discount_yes_")) {
         try {
@@ -10082,7 +10847,7 @@ async function handleCallback(update) {
             const state = await getState(userId);
             if (!state || state.state !== "custom_v2ray_checkout") {
                 await tg("sendMessage", { chat_id: chatId, text: "جلسه سفارش سفارشی منقضی شده. دوباره از اول شروع کن." });
-                return;
+                return null;
             }
             await setState(userId, "await_custom_discount_code", { productId, paymentMethod, walletUsed, checkout: state.payload });
             await tg("sendMessage", { chat_id: chatId, text: "کد تخفیف را ارسال کنید:" });
@@ -10091,7 +10856,7 @@ async function handleCallback(update) {
             logError("custom_v2ray_discount_yes_failed", e, { userId, chatId, data });
             await tg("sendMessage", { chat_id: chatId, text: "خطا در مرحله تخفیف." });
         }
-        return;
+        return null;
     }
     if (data.startsWith("custom_discount_no_")) {
         try {
@@ -10106,17 +10871,19 @@ async function handleCallback(update) {
             const state = await getState(userId);
             if (!state || state.state !== "custom_v2ray_checkout") {
                 await tg("sendMessage", { chat_id: chatId, text: "جلسه سفارش سفارشی منقضی شده. دوباره از اول شروع کن." });
-                return;
+                return null;
             }
             const checkout = state.payload || {};
             const totalPrice = Math.max(1, Math.round(Number(checkout.totalPrice || 0)));
             const dataMb = Math.max(1, Math.round(Number(checkout.dataMb || 0)));
             const days = Math.max(30, Math.round(Number(checkout.days || 30)));
             const gb = Math.max(1, Math.round(dataMb / 1024));
+            const configName = String(checkout.configName || "").trim() || undefined;
             const overrides = {
                 basePriceToman: totalPrice,
                 panelConfigPatch: { data_limit_mb: dataMb, expire_days: days, force_awaiting_config: true },
-                productNameSuffix: `(سفارشی ${gb}GB / ${days} روز)`
+                productNameSuffix: `(سفارشی ${gb}GB / ${days} روز)`,
+                configName
             };
             await clearState(userId);
             await createOrder(chatId, userId, productId, paymentMethod, null, paymentMethod === "wallet" ? 0 : walletUsed, overrides);
@@ -10125,20 +10892,24 @@ async function handleCallback(update) {
             logError("custom_v2ray_discount_no_failed", e, { userId, chatId, data });
             await tg("sendMessage", { chat_id: chatId, text: "خطا در ثبت سفارش." });
         }
-        return;
+        return null;
     }
     if (data.startsWith("use_wallet_custom_")) {
         const productId = Number(data.replace("use_wallet_custom_", ""));
         await setState(userId, "await_wallet_custom_amount", { productId });
         await tg("sendMessage", { chat_id: chatId, text: "لطفاً مبلغی که می‌خواهید از کیف پول کسر شود را به تومان وارد کنید (فقط عدد):" });
-        return;
+        return null;
     }
     if (data.startsWith("use_wallet_")) {
         const parts = data.replace("use_wallet_", "").split("_");
         const productId = Number(parts[0]);
         const amount = Number(parts[1]);
+        const state = await getState(userId);
+        if (state?.state === "bulk_purchase_pending") {
+            await setState(userId, "bulk_purchase_pending", { ...state.payload, walletUsed: amount });
+        }
         await showPaymentMethods(chatId, userId, productId, amount);
-        return;
+        return null;
     }
     if (data.startsWith("select_pay_")) {
         const payload = data.replace("select_pay_", "");
@@ -10149,21 +10920,26 @@ async function handleCallback(update) {
             walletUsed = Number(parts.pop());
         }
         const paymentMethod = parts.slice(1).join("_");
+        const state = await getState(userId);
+        if (state?.state === "bulk_purchase_pending") {
+            const bulkData = state.payload;
+            await setState(userId, "bulk_purchase_pending", { ...bulkData, paymentMethod, walletUsed });
+        }
         await showDiscountChoice(chatId, productId, paymentMethod, walletUsed);
-        return;
+        return null;
     }
     if (data.startsWith("select_crypto_wallet_")) {
         const walletId = Number(data.replace("select_crypto_wallet_", ""));
         const state = await getState(userId);
         if (!state || state.state !== "await_crypto_wallet_select")
-            return;
+            return null;
         const productId = Number(state.payload.productId);
         const discountInput = state.payload.discountInput ? String(state.payload.discountInput) : null;
         const walletUsedParam = Number(state.payload.walletUsedParam || 0);
         const overrides = state.payload.overrides ? state.payload.overrides : null;
         await clearState(userId);
         await createOrder(chatId, userId, productId, `crypto_${walletId}`, discountInput, walletUsedParam, overrides);
-        return;
+        return null;
     }
     if (data.startsWith("swapwallet_asset_")) {
         const payload = data.replace("swapwallet_asset_", "");
@@ -10171,17 +10947,17 @@ async function handleCallback(update) {
         const token = parts.length ? parts[0].toUpperCase() : "";
         const network = parts.length > 1 ? parts[1].toUpperCase() : "";
         if (!token || !network)
-            return;
+            return null;
         const state = await getState(userId);
         if (!state || state.state !== "await_swapwallet_asset_select")
-            return;
+            return null;
         const productId = Number(state.payload.productId);
         const discountInput = state.payload.discountInput ? String(state.payload.discountInput) : null;
         const walletUsedParam = Number(state.payload.walletUsedParam || 0);
         const overrides = state.payload.overrides ? state.payload.overrides : null;
         await clearState(userId);
         await createOrder(chatId, userId, productId, `swapwallet_${token}_${network}`, discountInput, walletUsedParam, overrides);
-        return;
+        return null;
     }
     if (data.startsWith("discount_yes_")) {
         const payload = data.replace("discount_yes_", "");
@@ -10192,9 +10968,16 @@ async function handleCallback(update) {
             walletUsed = Number(parts.pop());
         }
         const paymentMethod = parts.slice(1).join("_");
-        await setState(userId, "await_discount_code", { productId, paymentMethod, walletUsed });
+        const state = await getState(userId);
+        if (state?.state === "bulk_purchase_pending") {
+            const bulkData = state.payload;
+            await setState(userId, "await_discount_code", { ...bulkData, productId, paymentMethod, walletUsed });
+        }
+        else {
+            await setState(userId, "await_discount_code", { productId, paymentMethod, walletUsed });
+        }
         await tg("sendMessage", { chat_id: chatId, text: "کد تخفیف را ارسال کنید:" });
-        return;
+        return null;
     }
     if (data.startsWith("discount_no_")) {
         const payload = data.replace("discount_no_", "");
@@ -10205,15 +10988,25 @@ async function handleCallback(update) {
             walletUsed = Number(parts.pop());
         }
         const paymentMethod = parts.slice(1).join("_");
-        await clearState(userId);
-        await createOrder(chatId, userId, productId, paymentMethod, null, walletUsed);
-        return;
+        const state = await getState(userId);
+        if (state?.state === "bulk_purchase_pending") {
+            const bulkData = state.payload;
+            const quantity = Number(bulkData.quantity || 1);
+            const configName = String(bulkData.configName || "config");
+            await clearState(userId);
+            await createBulkOrders(chatId, userId, productId, paymentMethod, null, walletUsed, quantity, configName);
+        }
+        else {
+            await clearState(userId);
+            await createOrder(chatId, userId, productId, paymentMethod, null, walletUsed);
+        }
+        return null;
     }
     if (data.startsWith("check_order_")) {
         const purchaseId = data.replace("check_order_", "");
         if (await isRateLimited(userId, "check_order", 10_000)) {
             await tg("sendMessage", { chat_id: chatId, text: "کمی صبر کنید و دوباره تلاش کنید." });
-            return;
+            return null;
         }
         try {
             const orderRows = await sql `
@@ -10224,7 +11017,7 @@ async function handleCallback(update) {
       `;
             if (!orderRows.length) {
                 await tg("sendMessage", { chat_id: chatId, text: "سفارش یافت نشد." });
-                return;
+                return null;
             }
             const paymentMethod = orderRows[0].payment_method;
             let isAccepted = false;
@@ -10239,7 +11032,7 @@ async function handleCallback(update) {
                         ]
                     }
                 });
-                return;
+                return null;
             }
             else if (paymentMethod === "tronado") {
                 const tronadoApiKey = ((await getSetting("tronado_api_key")) || "").trim();
@@ -10255,7 +11048,7 @@ async function handleCallback(update) {
                     await notifyAdmins(`⚠️ Plisio txn_id برای سفارش ثبت نشده است\nسفارش: ${purchaseId}`, {
                         inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${purchaseId}` }]]
                     });
-                    return;
+                    return null;
                 }
                 const plisioApiKey = ((await getSetting("plisio_api_key")) || "").trim();
                 if (!plisioApiKey) {
@@ -10263,7 +11056,7 @@ async function handleCallback(update) {
                     await notifyAdmins(`⚠️ کلید Plisio تنظیم نشده است\nسفارش: ${purchaseId}`, {
                         inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${purchaseId}` }]]
                     });
-                    return;
+                    return null;
                 }
                 const { getPlisioOperation } = await import("./plisio.js");
                 const op = await getPlisioOperation({ apiKey: plisioApiKey, operationId: txnId });
@@ -10274,7 +11067,7 @@ async function handleCallback(update) {
                     await notifyAdmins(`⚠️ وضعیت ناموفق Plisio\nسفارش: ${purchaseId}\nstatus: ${s}\ntxn: ${txnId}`, {
                         inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${purchaseId}` }]]
                     });
-                    return;
+                    return null;
                 }
                 isAccepted = s === "completed" || s === "mismatch";
             }
@@ -10282,11 +11075,11 @@ async function handleCallback(update) {
                 const existingReceipt = String(orderRows[0].receipt_file_id || "").trim() || "";
                 if (existingReceipt) {
                     await tg("sendMessage", { chat_id: chatId, text: "قبلاً برای این سفارش اطلاعات پرداخت ثبت شده و در انتظار تایید ادمین است." });
-                    return;
+                    return null;
                 }
                 await setState(userId, "await_crypto_receipt", { purchaseId });
                 await tg("sendMessage", { chat_id: chatId, text: "لطفاً اسکرین‌شات پرداخت را به صورت عکس ارسال کنید:" });
-                return;
+                return null;
             }
             if (isAccepted) {
                 const fulfill = await fulfillOrderByPaymentId(purchaseId);
@@ -10316,12 +11109,12 @@ async function handleCallback(update) {
             logError("check_order_status_failed", error, { purchaseId, userId, chatId });
             await tg("sendMessage", { chat_id: chatId, text: "خطا در بررسی وضعیت پرداخت." });
         }
-        return;
+        return null;
     }
     if (data.startsWith("crypto_receipt_")) {
         const purchaseId = data.replace("crypto_receipt_", "").trim();
         if (!purchaseId)
-            return;
+            return null;
         const rows = await sql `
       SELECT id, status, payment_method
       FROM orders
@@ -10330,26 +11123,26 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "سفارش پیدا نشد." });
-            return;
+            return null;
         }
         const order = rows[0];
         const method = String(order.payment_method || "").toLowerCase();
         if (!(method === "tronado" || method === "plisio" || method === "tetrapay")) {
             await tg("sendMessage", { chat_id: chatId, text: "این سفارش نیازی به ارسال اسکرین‌شات ندارد." });
-            return;
+            return null;
         }
         const status = String(order.status || "").toLowerCase();
         if (status === "paid") {
             await tg("sendMessage", { chat_id: chatId, text: "این سفارش قبلاً پرداخت شده است ✅" });
-            return;
+            return null;
         }
         if (status === "denied" || status === "cancelled") {
             await tg("sendMessage", { chat_id: chatId, text: "این سفارش بسته شده است." });
-            return;
+            return null;
         }
         await setState(userId, "await_crypto_receipt", { orderId: Number(order.id) });
         await tg("sendMessage", { chat_id: chatId, text: "لطفاً اسکرین‌شات پرداخت را به صورت عکس ارسال کن:" });
-        return;
+        return null;
     }
     if (data.startsWith("show_configs_")) {
         const payload = data.replace("show_configs_", "");
@@ -10368,14 +11161,14 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "این سفارش برای شما نیست یا یافت نشد." });
-            return;
+            return null;
         }
         const inv = rows[0];
         const payloadObj = parseDeliveryPayload(inv.delivery_payload);
         const links = payloadObj.configLinks || [];
         if (links.length <= 1) {
             await tg("sendMessage", { chat_id: chatId, text: "برای این سفارش کانفیگ اضافی وجود ندارد." });
-            return;
+            return null;
         }
         const pageSize = 5;
         const totalPages = Math.max(1, Math.ceil(links.length / pageSize));
@@ -10397,15 +11190,15 @@ async function handleCallback(update) {
         keyboard.push([{ text: "📦 کانفیگ‌های من", callback_data: "my_configs" }]);
         keyboard.push([homeButton()]);
         await tg("sendMessage", { chat_id: chatId, text, reply_markup: { inline_keyboard: keyboard } });
-        return;
+        return null;
     }
     if (data === "my_configs") {
         await showMyConfigs(chatId, userId, false);
-        return;
+        return null;
     }
     if (data === "my_orders") {
         await showMyOrders(chatId, userId);
-        return;
+        return null;
     }
     if (data === "order_lookup") {
         await setState(userId, "await_order_lookup");
@@ -10414,27 +11207,27 @@ async function handleCallback(update) {
             text: "شناسه سفارش را ارسال کن (مثال: P1712345678901234):",
             reply_markup: { inline_keyboard: [[backButton("my_orders")], [homeButton()]] }
         });
-        return;
+        return null;
     }
     if (data.startsWith("open_order_")) {
         const purchaseId = data.replace("open_order_", "").trim();
         if (!purchaseId)
-            return;
+            return null;
         await showOrderDetails(chatId, userId, purchaseId);
-        return;
+        return null;
     }
     if (data.startsWith("order_send_receipt_")) {
         const orderId = Number(data.replace("order_send_receipt_", ""));
         if (!Number.isFinite(orderId) || orderId <= 0)
-            return;
+            return null;
         const rows = await sql `SELECT id, status, purchase_id FROM orders WHERE id = ${orderId} AND telegram_id = ${userId} LIMIT 1;`;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "سفارش پیدا نشد." });
-            return;
+            return null;
         }
         if (String(rows[0].status || "").toLowerCase() !== "awaiting_receipt") {
             await tg("sendMessage", { chat_id: chatId, text: "برای این سفارش نیازی به ارسال رسید نیست." });
-            return;
+            return null;
         }
         await setState(userId, "await_receipt", { orderId });
         const purchaseId = String(rows[0].purchase_id || "").trim();
@@ -10443,12 +11236,12 @@ async function handleCallback(update) {
             text: "لطفاً تصویر رسید را به صورت عکس ارسال کن:",
             reply_markup: { inline_keyboard: [[backButton(`open_order_${purchaseId}`)], [homeButton()]] }
         });
-        return;
+        return null;
     }
     if (data.startsWith("order_cancel_")) {
         const purchaseId = data.replace("order_cancel_", "").trim();
         if (!purchaseId)
-            return;
+            return null;
         const rows = await sql `
       UPDATE orders
       SET status = 'cancelled'
@@ -10472,15 +11265,15 @@ async function handleCallback(update) {
         if (rows.length) {
             await showOrderDetails(chatId, userId, purchaseId);
         }
-        return;
+        return null;
     }
     if (data === "my_migrations") {
         await showMyMigrations(chatId, userId);
-        return;
+        return null;
     }
     if (data === "topup_menu") {
         await showMyConfigs(chatId, userId, true);
-        return;
+        return null;
     }
     if (data.startsWith("open_config_")) {
         const payload = data.replace("open_config_", "");
@@ -10488,10 +11281,10 @@ async function handleCallback(update) {
         const inventoryId = Number(fromTopupFlow ? payload.slice(0, -2) : payload);
         if (!Number.isFinite(inventoryId) || inventoryId <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "کانفیگ انتخاب‌شده معتبر نیست." });
-            return;
+            return null;
         }
         await openMyConfig(chatId, userId, inventoryId, fromTopupFlow);
-        return;
+        return null;
     }
     if (data.startsWith("request_topup_")) {
         const inventoryId = Number(data.replace("request_topup_", ""));
@@ -10502,7 +11295,7 @@ async function handleCallback(update) {
     `;
         if (!ownRows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "این کانفیگ برای شما نیست یا یافت نشد." });
-            return;
+            return null;
         }
         await tg("sendMessage", {
             chat_id: chatId,
@@ -10522,12 +11315,12 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data.startsWith("config_migrate_targets_")) {
         const inventoryId = Number(data.replace("config_migrate_targets_", ""));
         await showCustomerMigrationTargets(chatId, inventoryId, userId);
-        return;
+        return null;
     }
     if (data.startsWith("migrate_pick_")) {
         const payload = data.replace("migrate_pick_", "");
@@ -10535,7 +11328,7 @@ async function handleCallback(update) {
         const inventoryId = Number(inventoryRaw);
         const panelId = Number(panelRaw);
         await createMigrationRequest(chatId, userId, userId, inventoryId, panelId, "customer");
-        return;
+        return null;
     }
     if (data.startsWith("topup_custom_")) {
         const inventoryId = Number(data.replace("topup_custom_", ""));
@@ -10544,7 +11337,7 @@ async function handleCallback(update) {
             chat_id: chatId,
             text: "مقدار دلخواه را بفرستید.\nنمونه: 1536 یا 1.5GB یا 800MB"
         });
-        return;
+        return null;
     }
     if (data.startsWith("topup_amount_")) {
         const payload = data.replace("topup_amount_", "");
@@ -10552,7 +11345,7 @@ async function handleCallback(update) {
         const inventoryId = Number(inventoryIdRaw);
         const mb = Number(mbRaw);
         await createTopupCard2CardRequest(chatId, userId, inventoryId, mb);
-        return;
+        return null;
     }
     if (data.startsWith("customer_remove_cfg_")) {
         const inventoryId = Number(data.replace("customer_remove_cfg_", ""));
@@ -10564,7 +11357,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "این کانفیگ پیدا نشد یا متعلق به شما نیست." });
-            return;
+            return null;
         }
         await recordInventoryForensicEvent(inventoryId, "customer_removed_from_inventory", { actorUser: userId });
         await sql `
@@ -10585,18 +11378,18 @@ async function handleCallback(update) {
       WHERE id = ${inventoryId};
     `;
         await tg("sendMessage", { chat_id: chatId, text: "کانفیگ از لیست شما حذف شد ✅\nاطلاعات برای پیگیری امنیتی ذخیره شد." });
-        return;
+        return null;
     }
     if (data.startsWith("customer_revoke_cfg_")) {
         const inventoryId = Number(data.replace("customer_revoke_cfg_", ""));
         await performRegenLink(inventoryId, userId, false, chatId);
-        return;
+        return null;
     }
     if (data === "support") {
         const support = await getSetting("support_username");
         if (!support) {
             await tg("sendMessage", { chat_id: chatId, text: "پشتیبانی هنوز تنظیم نشده است." });
-            return;
+            return null;
         }
         await tg("sendMessage", {
             chat_id: chatId,
@@ -10608,15 +11401,15 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (!isAdmin(userId))
-        return;
+        return null;
     if (data.startsWith("admin_lookup_ban_")) {
         const targetUser = Number(data.replace("admin_lookup_ban_", ""));
         if (!Number.isFinite(targetUser) || targetUser <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "شناسه کاربر نامعتبر است." });
-            return;
+            return null;
         }
         await sql `
       INSERT INTO banned_users (telegram_id, reason, banned_by)
@@ -10624,12 +11417,12 @@ async function handleCallback(update) {
       ON CONFLICT (telegram_id) DO UPDATE SET reason = EXCLUDED.reason, banned_by = EXCLUDED.banned_by;
     `;
         await tg("sendMessage", { chat_id: chatId, text: `کاربر ${targetUser} بن شد ✅` });
-        return;
+        return null;
     }
     if (data.startsWith("admin_lookup_toggle_inv_")) {
         const inventoryId = Number(data.replace("admin_lookup_toggle_inv_", ""));
         if (!Number.isFinite(inventoryId))
-            return;
+            return null;
         const rows = await sql `
       SELECT i.id, i.panel_id, i.delivery_payload, i.owner_telegram_id
       FROM inventory i
@@ -10638,7 +11431,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "کانفیگ پیدا نشد." });
-            return;
+            return null;
         }
         const row = rows[0];
         const delivery = parseDeliveryPayload(row.delivery_payload);
@@ -10672,14 +11465,14 @@ async function handleCallback(update) {
       WHERE id = ${inventoryId};
     `;
         await tg("sendMessage", { chat_id: chatId, text: `وضعیت کانفیگ تغییر یافت (${willEnable ? 'فعال' : 'غیرفعال'}) ✅\n${panelToggleMessage}` });
-        return;
+        return null;
     }
     if (data.startsWith("admin_lookup_regen_link_")) {
         const inventoryId = Number(data.replace("admin_lookup_regen_link_", ""));
         if (!Number.isFinite(inventoryId))
-            return;
+            return null;
         await performRegenLink(inventoryId, userId, true, chatId);
-        return;
+        return null;
     }
     if (data.startsWith("admin_lookup_revoke_inv_")) {
         let inventoryIdRaw = data.replace("admin_lookup_revoke_inv_", "");
@@ -10701,7 +11494,7 @@ async function handleCallback(update) {
                     ]
                 }
             });
-            return;
+            return null;
         }
         const inventoryIdFinal = inventoryId;
         const rows = await sql `
@@ -10712,7 +11505,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "کانفیگ پیدا نشد." });
-            return;
+            return null;
         }
         const row = rows[0];
         const delivery = parseDeliveryPayload(row.delivery_payload);
@@ -10744,12 +11537,12 @@ async function handleCallback(update) {
       WHERE id = ${inventoryId};
     `;
         await tg("sendMessage", { chat_id: chatId, text: `دسترسی کانفیگ قطع شد ✅\n${panelRevokeMessage}` });
-        return;
+        return null;
     }
     if (data.startsWith("admin_lookup_direct_links_")) {
         const inventoryId = Number(data.replace("admin_lookup_direct_links_", ""));
         if (!Number.isFinite(inventoryId))
-            return;
+            return null;
         const rows = await sql `
       SELECT id, delivery_payload, config_value
       FROM inventory
@@ -10758,7 +11551,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "کانفیگ پیدا نشد." });
-            return;
+            return null;
         }
         const row = rows[0];
         const delivery = parseDeliveryPayload(row.delivery_payload);
@@ -10770,7 +11563,7 @@ async function handleCallback(update) {
             }
             else {
                 await tg("sendMessage", { chat_id: chatId, text: "لینک مستقیمی برای این کانفیگ یافت نشد." });
-                return;
+                return null;
             }
         }
         // Send the links to the admin (using chunks to avoid Telegram's character limits for large link arrays)
@@ -10785,7 +11578,7 @@ async function handleCallback(update) {
                 parse_mode: "HTML"
             });
         }
-        return;
+        return null;
     }
     if (data.startsWith("admin_lookup_delete_inv_")) {
         let inventoryIdRaw = data.replace("admin_lookup_delete_inv_", "");
@@ -10796,7 +11589,7 @@ async function handleCallback(update) {
         const inventoryId = Number(inventoryIdRaw);
         if (!Number.isFinite(inventoryId)) {
             await tg("sendMessage", { chat_id: chatId, text: "شناسه کانفیگ نامعتبر است." });
-            return;
+            return null;
         }
         if (!isConfirmed) {
             await tg("sendMessage", {
@@ -10811,7 +11604,7 @@ async function handleCallback(update) {
                     ]
                 }
             });
-            return;
+            return null;
         }
         const inventoryIdFinal = inventoryId;
         const rows = await sql `
@@ -10822,7 +11615,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "کانفیگ پیدا نشد." });
-            return;
+            return null;
         }
         const row = rows[0];
         const delivery = parseDeliveryPayload(row.delivery_payload);
@@ -10868,13 +11661,13 @@ async function handleCallback(update) {
             logError("admin_inventory_delete_failed", err, { inventoryId, adminId: userId });
             await tg("sendMessage", { chat_id: chatId, text: `❌ حذف کانفیگ از دیتابیس با خطا مواجه شد.\n${err.message}` });
         }
-        return;
+        return null;
     }
     if (data.startsWith("admin_lookup_add_data_")) {
         const inventoryId = Number(data.replace("admin_lookup_add_data_", ""));
         if (!Number.isFinite(inventoryId) || inventoryId <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "شناسه کانفیگ نامعتبر است." });
-            return;
+            return null;
         }
         await setState(userId, "admin_lookup_add_data", { inventoryId });
         await tg("sendMessage", {
@@ -10882,13 +11675,13 @@ async function handleCallback(update) {
             text: "مقدار دیتای اضافه را ارسال کنید.\nمثال: 500MB یا 2GB",
             reply_markup: { inline_keyboard: [[cancelButton("admin_lookup_action_cancel")]] }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_lookup_set_data_")) {
         const inventoryId = Number(data.replace("admin_lookup_set_data_", ""));
         if (!Number.isFinite(inventoryId) || inventoryId <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "شناسه کانفیگ نامعتبر است." });
-            return;
+            return null;
         }
         await setState(userId, "admin_lookup_set_data", { inventoryId });
         await tg("sendMessage", {
@@ -10896,7 +11689,7 @@ async function handleCallback(update) {
             text: "سقف دیتای جدید را ارسال کنید.\nمثال: 50GB یا 102400MB یا unlimited\nبرای نامحدود: unlimited یا 0",
             reply_markup: { inline_keyboard: [[cancelButton("admin_lookup_action_cancel")]] }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_lookup_reset_data_")) {
         let inventoryIdRaw = data.replace("admin_lookup_reset_data_", "");
@@ -10907,7 +11700,7 @@ async function handleCallback(update) {
         const inventoryId = Number(inventoryIdRaw);
         if (!Number.isFinite(inventoryId)) {
             await tg("sendMessage", { chat_id: chatId, text: "شناسه کانفیگ نامعتبر است." });
-            return;
+            return null;
         }
         if (!isConfirmed) {
             await tg("sendMessage", {
@@ -10922,12 +11715,12 @@ async function handleCallback(update) {
                     ]
                 }
             });
-            return;
+            return null;
         }
         const inventoryIdFinal = inventoryId;
         if (!Number.isFinite(inventoryIdFinal) || inventoryIdFinal <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "شناسه کانفیگ نامعتبر است." });
-            return;
+            return null;
         }
         const rows = await sql `
       SELECT i.id, i.panel_id, i.delivery_payload, p.size_mb, p.is_infinite
@@ -10938,7 +11731,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "کانفیگ پیدا نشد." });
-            return;
+            return null;
         }
         const row = rows[0];
         const delivery = parseDeliveryPayload(row.delivery_payload);
@@ -10946,7 +11739,7 @@ async function handleCallback(update) {
         const panelId = Number(row.panel_id || 0);
         if (!panelId || !panelType) {
             await tg("sendMessage", { chat_id: chatId, text: "این کانفیگ پنلی نیست." });
-            return;
+            return null;
         }
         const panelRows = await sql `
       SELECT id, panel_type, base_url, username, password
@@ -10956,14 +11749,14 @@ async function handleCallback(update) {
     `;
         if (!panelRows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "پنل مرتبط پیدا نشد." });
-            return;
+            return null;
         }
         let result = { ok: false, message: "پنل پشتیبانی نمی‌شود." };
         if (panelType === "marzban") {
             const username = String(delivery.metadata?.username || "").trim();
             if (!username) {
                 await tg("sendMessage", { chat_id: chatId, text: "username پنل در متادیتا پیدا نشد." });
-                return;
+                return null;
             }
             result = await applyAdminResetUsageOnMarzban(panelRows[0], username);
         }
@@ -10972,13 +11765,13 @@ async function handleCallback(update) {
             const email = String(delivery.metadata?.email || "").trim();
             if (!inboundId || !email) {
                 await tg("sendMessage", { chat_id: chatId, text: "inbound/email در متادیتا کانفیگ ناقص است." });
-                return;
+                return null;
             }
             result = await applyAdminResetUsageOnSanaei(panelRows[0], inboundId, email);
         }
         if (!result.ok) {
             await tg("sendMessage", { chat_id: chatId, text: `ریست دیتا انجام نشد.\n${result.message}` });
-            return;
+            return null;
         }
         await recordInventoryForensicEvent(inventoryId, "admin_lookup_reset_data", {
             adminId: userId,
@@ -10988,7 +11781,7 @@ async function handleCallback(update) {
             chat_id: chatId,
             text: `مصرف دیتای کانفیگ صفر شد ✅\n${result.message}`
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_lookup_set_expiry_")) {
         const payload = data.replace("admin_lookup_set_expiry_", "");
@@ -10997,14 +11790,14 @@ async function handleCallback(update) {
         const forcedDays = daysRaw !== undefined ? Number(daysRaw) : NaN;
         if (!Number.isFinite(inventoryId) || inventoryId <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "شناسه کانفیگ نامعتبر است." });
-            return;
+            return null;
         }
         if (Number.isFinite(forcedDays) && forcedDays >= 0) {
             await parseAndApplyState(chatId, userId, String(Math.round(forcedDays)), null, null, null, {
                 state: "admin_lookup_set_expiry",
                 payload: { inventoryId }
             });
-            return;
+            return null;
         }
         await setState(userId, "admin_lookup_set_expiry", { inventoryId });
         await tg("sendMessage", {
@@ -11012,12 +11805,12 @@ async function handleCallback(update) {
             text: "چند روز انقضا تنظیم شود؟\n0 = بدون انقضا",
             reply_markup: { inline_keyboard: [[cancelButton("admin_lookup_action_cancel")]] }
         });
-        return;
+        return null;
     }
     if (data === "admin_lookup_action_cancel") {
         await clearState(userId);
         await tg("sendMessage", { chat_id: chatId, text: "عملیات ابزار کانفیگ لغو شد." });
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_add_data_")) {
         const payload = data.replace("admin_panel_add_data_", "");
@@ -11026,7 +11819,7 @@ async function handleCallback(update) {
         const panelKey = decodeURIComponent(firstUnderscore >= 0 ? payload.slice(firstUnderscore + 1) : "");
         if (!Number.isFinite(panelId) || panelId <= 0 || !panelKey) {
             await tg("sendMessage", { chat_id: chatId, text: "ورودی نامعتبر برای افزودن دیتا." });
-            return;
+            return null;
         }
         await setState(userId, "admin_panel_add_data", { panelId, panelKey });
         await tg("sendMessage", {
@@ -11034,7 +11827,7 @@ async function handleCallback(update) {
             text: "مقدار دیتای اضافه را ارسال کنید.\nمثال: 500MB یا 2GB",
             reply_markup: { inline_keyboard: [[cancelButton("admin_lookup_action_cancel")]] }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_set_data_")) {
         const payload = data.replace("admin_panel_set_data_", "");
@@ -11043,7 +11836,7 @@ async function handleCallback(update) {
         const panelKey = decodeURIComponent(firstUnderscore >= 0 ? payload.slice(firstUnderscore + 1) : "");
         if (!Number.isFinite(panelId) || panelId <= 0 || !panelKey) {
             await tg("sendMessage", { chat_id: chatId, text: "ورودی نامعتبر برای تنظیم سقف دیتا." });
-            return;
+            return null;
         }
         await setState(userId, "admin_panel_set_data", { panelId, panelKey });
         await tg("sendMessage", {
@@ -11051,7 +11844,7 @@ async function handleCallback(update) {
             text: "سقف دیتای جدید را ارسال کنید.\nمثال: 50GB یا 102400MB یا unlimited\nبرای نامحدود: unlimited یا 0",
             reply_markup: { inline_keyboard: [[cancelButton("admin_lookup_action_cancel")]] }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_reset_data_")) {
         const payload = data.replace("admin_panel_reset_data_", "");
@@ -11060,7 +11853,7 @@ async function handleCallback(update) {
         const panelKey = decodeURIComponent(firstUnderscore >= 0 ? payload.slice(firstUnderscore + 1) : "");
         if (!Number.isFinite(panelId) || panelId <= 0 || !panelKey) {
             await tg("sendMessage", { chat_id: chatId, text: "ورودی نامعتبر برای ریست دیتا." });
-            return;
+            return null;
         }
         const panelRows = await sql `
       SELECT id, panel_type, base_url, username, password
@@ -11070,7 +11863,7 @@ async function handleCallback(update) {
     `;
         if (!panelRows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "پنل مرتبط پیدا نشد." });
-            return;
+            return null;
         }
         const panel = panelRows[0];
         const panelType = String(panel.panel_type || "");
@@ -11080,7 +11873,7 @@ async function handleCallback(update) {
             const found = await lookupMarzbanUser(panel, panelKey);
             if (!found.ok || !found.user) {
                 await tg("sendMessage", { chat_id: chatId, text: "کاربر روی پنل پیدا نشد." });
-                return;
+                return null;
             }
             limitBytes = Math.max(0, Math.round(Number(found.user.data_limit || 0)));
             const username = String(found.user.username || panelKey).trim();
@@ -11090,19 +11883,19 @@ async function handleCallback(update) {
             const found = await findSanaeiClientByIdentifier(panel, panelKey);
             if (!found.ok || !found.client || !found.inboundId) {
                 await tg("sendMessage", { chat_id: chatId, text: "کلاینت روی پنل پیدا نشد." });
-                return;
+                return null;
             }
             const email = String(found.client.email || "").trim();
             if (!email) {
                 await tg("sendMessage", { chat_id: chatId, text: "email کلاینت روی پنل پیدا نشد." });
-                return;
+                return null;
             }
             limitBytes = Math.max(0, Math.round(Number(found.client.totalGB || 0)));
             result = await applyAdminResetUsageOnSanaei(panel, Number(found.inboundId), email);
         }
         if (!result.ok) {
             await tg("sendMessage", { chat_id: chatId, text: `ریست دیتا انجام نشد.\n${result.message}` });
-            return;
+            return null;
         }
         await recordForensicEvent({
             inventoryId: null,
@@ -11121,7 +11914,7 @@ async function handleCallback(update) {
             chat_id: chatId,
             text: `مصرف کاربر ریست شد ✅\nسقف فعلی: ${limitBytes > 0 ? formatBytesShort(limitBytes) : "نامحدود"}`
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_set_expiry_")) {
         const payload = data.replace("admin_panel_set_expiry_", "");
@@ -11136,14 +11929,14 @@ async function handleCallback(update) {
         const panelKey = decodeURIComponent(panelKeyEncoded);
         if (!Number.isFinite(panelId) || panelId <= 0 || !panelKey) {
             await tg("sendMessage", { chat_id: chatId, text: "ورودی نامعتبر برای تنظیم انقضا." });
-            return;
+            return null;
         }
         if (Number.isFinite(maybeDays) && maybeDays >= 0) {
             await parseAndApplyState(chatId, userId, String(Math.round(maybeDays)), null, null, null, {
                 state: "admin_panel_set_expiry",
                 payload: { panelId, panelKey }
             });
-            return;
+            return null;
         }
         await setState(userId, "admin_panel_set_expiry", { panelId, panelKey });
         await tg("sendMessage", {
@@ -11151,22 +11944,27 @@ async function handleCallback(update) {
             text: "چند روز انقضا تنظیم شود؟\n0 = بدون انقضا",
             reply_markup: { inline_keyboard: [[cancelButton("admin_lookup_action_cancel")]] }
         });
-        return;
+        return null;
     }
-    if (data.startsWith("admin_panel_toggle_")) {
-        const payload = data.replace("admin_panel_toggle_", "");
-        const firstUnderscore = payload.indexOf("_");
-        const panelId = Number(firstUnderscore >= 0 ? payload.slice(0, firstUnderscore) : "0");
-        const key = decodeURIComponent(firstUnderscore >= 0 ? payload.slice(firstUnderscore + 1) : "");
+    // Toggle client on panel (admin_panel_toggle_{id}_{encodedKey}). Must run AFTER numeric
+    // admin_panel_toggle_{id}, admin_panel_toggle_move_, and admin_panel_toggle_sales_ — otherwise
+    // those callbacks are misparsed (panel id becomes 0 / key empty → «ورودی نامعتبر...»).
+    if (data.startsWith("admin_panel_toggle_") &&
+        !data.startsWith("admin_panel_toggle_move_") &&
+        !data.startsWith("admin_panel_toggle_sales_") &&
+        !/^admin_panel_toggle_\d+$/.test(data)) {
+        const userToggleMatch = data.match(/^admin_panel_toggle_(\d+)_(.+)$/);
+        const panelId = userToggleMatch ? Number(userToggleMatch[1]) : NaN;
+        const key = userToggleMatch ? decodeURIComponent(userToggleMatch[2]) : "";
         const rows = await sql `
-      SELECT id, panel_type, base_url, username, password
+      SELECT id, panel_type, base_url, username, password, subscription_public_port
       FROM panels
       WHERE id = ${panelId}
       LIMIT 1;
     `;
-        if (!rows.length || !key) {
+        if (!userToggleMatch || !Number.isFinite(panelId) || panelId <= 0 || !rows.length || !key) {
             await tg("sendMessage", { chat_id: chatId, text: "ورودی نامعتبر برای تغییر وضعیت پنل." });
-            return;
+            return null;
         }
         const panelType = String(rows[0].panel_type || "");
         let willEnable = true;
@@ -11174,26 +11972,26 @@ async function handleCallback(update) {
             const found = await lookupMarzbanUser(rows[0], key);
             if (!found.ok || !found.user) {
                 await tg("sendMessage", { chat_id: chatId, text: `پیدا نشد: ${found.message}` });
-                return;
+                return null;
             }
             willEnable = found.user.status === "disabled";
             const result = await toggleMarzbanUser(rows[0], key, willEnable);
             if (!result.ok) {
                 await tg("sendMessage", { chat_id: chatId, text: `عملیات پنل ناموفق: ${result.message}` });
-                return;
+                return null;
             }
         }
         else {
             const found = await findSanaeiClientByIdentifier(rows[0], key);
             if (!found.ok || !found.client) {
                 await tg("sendMessage", { chat_id: chatId, text: `پیدا نشد: ${found.message}` });
-                return;
+                return null;
             }
             willEnable = found.client.enable === false;
             const result = await toggleSanaeiClient(rows[0], key, willEnable);
             if (!result.ok) {
                 await tg("sendMessage", { chat_id: chatId, text: `عملیات پنل ناموفق: ${result.message}` });
-                return;
+                return null;
             }
         }
         await recordForensicEvent({
@@ -11210,7 +12008,7 @@ async function handleCallback(update) {
             metadata: { adminId: userId }
         });
         await tg("sendMessage", { chat_id: chatId, text: `وضعیت کاربر در پنل تغییر یافت (${willEnable ? 'فعال' : 'غیرفعال'}) ✅` });
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_rv_")) {
         const isConfirmed = data.includes("_confirm");
@@ -11228,27 +12026,27 @@ async function handleCallback(update) {
                     ]
                 }
             });
-            return;
+            return null;
         }
         const payload = payloadRaw;
         const firstUnderscore = payload.indexOf("_");
         const panelId = Number(firstUnderscore >= 0 ? payload.slice(0, firstUnderscore) : "0");
         const key = decodeURIComponent(firstUnderscore >= 0 ? payload.slice(firstUnderscore + 1) : "");
         const rows = await sql `
-      SELECT id, panel_type, base_url, username, password
+      SELECT id, panel_type, base_url, username, password, subscription_public_port, subscription_public_host, subscription_link_protocol, config_public_host
       FROM panels
       WHERE id = ${panelId}
       LIMIT 1;
     `;
         if (!rows.length || !key) {
             await tg("sendMessage", { chat_id: chatId, text: "ورودی نامعتبر برای بازسازی لینک پنل." });
-            return;
+            return null;
         }
         const panelType = String(rows[0].panel_type || "");
         const result = panelType === "marzban" ? await regenerateMarzbanUserLink(rows[0], key) : await regenerateSanaeiClientLink(rows[0], key);
         if (!result.ok) {
             await tg("sendMessage", { chat_id: chatId, text: `بازسازی لینک پنل ناموفق: ${result.message}` });
-            return;
+            return null;
         }
         let newLinkMsg = "";
         if (panelType === "marzban") {
@@ -11266,9 +12064,10 @@ async function handleCallback(update) {
         LIMIT 1;
       `;
             const panelConfig = panelConfigRows.length ? (typeof panelConfigRows[0].panel_config === "string" ? parseJsonObject(panelConfigRows[0].panel_config) : panelConfigRows[0].panel_config) || {} : {};
-            const newConfigLinks = buildSanaeiConfigLinks(String(rows[0].base_url), result.inbound, result.client, panelConfig);
+            const mergedCfg = mergeSanaeiPanelRowIntoClientConfig(panelConfig, rows[0]);
+            const newConfigLinks = buildSanaeiConfigLinks(String(rows[0].base_url), result.inbound, result.client, mergedCfg);
             const subId = String(result.client?.subId || "");
-            const subUrl = subId ? buildSanaeiSubscriptionUrl(String(rows[0].base_url), panelConfig, subId) : "";
+            const subUrl = subId ? buildSanaeiSubscriptionUrl(String(rows[0].base_url), panelConfig, subId, rows[0]) : "";
             newLinkMsg = subUrl || newConfigLinks[0] || "";
         }
         await recordForensicEvent({
@@ -11285,7 +12084,7 @@ async function handleCallback(update) {
             metadata: { adminId: userId }
         });
         await tg("sendMessage", { chat_id: chatId, text: `لینک جدید ساخته شد ✅\n\n${newLinkMsg}` });
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_del_")) {
         const isConfirmed = data.includes("_confirm");
@@ -11303,27 +12102,27 @@ async function handleCallback(update) {
                     ]
                 }
             });
-            return;
+            return null;
         }
         const payload = payloadRaw;
         const firstUnderscore = payload.indexOf("_");
         const panelId = Number(firstUnderscore >= 0 ? payload.slice(0, firstUnderscore) : "0");
         const key = decodeURIComponent(firstUnderscore >= 0 ? payload.slice(firstUnderscore + 1) : "");
         const rows = await sql `
-      SELECT id, panel_type, base_url, username, password
+      SELECT id, panel_type, base_url, username, password, subscription_public_port
       FROM panels
       WHERE id = ${panelId}
       LIMIT 1;
     `;
         if (!rows.length || !key) {
             await tg("sendMessage", { chat_id: chatId, text: "ورودی نامعتبر برای حذف پنل." });
-            return;
+            return null;
         }
         const panelType = String(rows[0].panel_type || "");
         const result = panelType === "marzban" ? await deleteMarzbanUser(rows[0], key) : await revokeSanaeiClient(rows[0], key);
         if (!result.ok) {
             await tg("sendMessage", { chat_id: chatId, text: `حذف در پنل ناموفق: ${result.message}` });
-            return;
+            return null;
         }
         await recordForensicEvent({
             inventoryId: null,
@@ -11339,54 +12138,159 @@ async function handleCallback(update) {
             metadata: { adminId: userId }
         });
         await tg("sendMessage", { chat_id: chatId, text: "حذف/غیرفعالسازی در پنل انجام شد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_panel") {
         await sendAdminPanel(chatId);
-        return;
+        return null;
     }
     if (data === "admin_panels") {
         await showPanelAdminMenu(chatId);
-        return;
+        return null;
     }
     if (data === "admin_panel_add") {
         await promptPanelTypePicker(chatId, "add");
-        return;
+        return null;
     }
-    if (/^noop_panel_\d+$/.test(data) || data.startsWith("admin_panel_open_")) {
+    if (/^noop_panel_\d+$/.test(data)) {
         const panelId = Number((data.match(/\d+$/) || ["0"])[0]);
         await showPanelDetails(chatId, panelId);
-        return;
+        return null;
+    }
+    if (data.startsWith("admin_panel_open_")) {
+        const panelId = Number((data.match(/\d+$/) || ["0"])[0]);
+        await clearState(userId);
+        await showPanelDetails(chatId, panelId);
+        return null;
+    }
+    if (data.startsWith("admin_panel_set_subport_")) {
+        const panelId = Number(data.replace("admin_panel_set_subport_", ""));
+        if (!Number.isFinite(panelId) || panelId <= 0) {
+            await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+            return null;
+        }
+        const panel = await getPanelById(panelId);
+        if (!panel || String(panel.panel_type) !== "sanaei") {
+            await tg("sendMessage", { chat_id: chatId, text: "این گزینه فقط برای پنل Sanaei / 3x-ui است." });
+            return null;
+        }
+        const cur = panel.subscription_public_port != null && Number(panel.subscription_public_port) > 0
+            ? String(panel.subscription_public_port)
+            : "خودکار (پورت آدرس پنل)";
+        await setState(userId, "admin_panel_subport_edit", { panelId });
+        await tg("sendMessage", {
+            chat_id: chatId,
+            text: `🔢 پورت عمومی لینک سابسکریپشن\nپنل: ${panel.name}\nفعلی: ${cur}\n\n` +
+                `عدد ۱–۶۵۵۳۵ بفرستید (مثلاً 8080).\n0 یا auto = همان پورت آدرس پنل\n- = انصراف`,
+            reply_markup: { inline_keyboard: [[{ text: "❌ انصراف", callback_data: `admin_panel_open_${panelId}` }]] }
+        });
+        return null;
+    }
+    if (data.startsWith("admin_panel_set_suburl_")) {
+        const panelId = Number(data.replace("admin_panel_set_suburl_", ""));
+        if (!Number.isFinite(panelId) || panelId <= 0) {
+            await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+            return null;
+        }
+        const panel = await getPanelById(panelId);
+        if (!panel || String(panel.panel_type) !== "sanaei") {
+            await tg("sendMessage", { chat_id: chatId, text: "این گزینه فقط برای پنل Sanaei / 3x-ui است." });
+            return null;
+        }
+        await tg("sendMessage", {
+            chat_id: chatId,
+            text: `🔗 دامنه و پروتکل لینک سابسکریپشن\nپنل: ${panel.name}\n\n` +
+                `۱) پروتکل را انتخاب کنید.\n` +
+                `۲) سپس فقط نام میزبان را بفرستید (مثال: sub.example.com).\n\n` +
+                `در مرحلهٔ دوم: 0 یا auto = همان hostname آدرس پنل\n- = انصراف`,
+            reply_markup: {
+                inline_keyboard: [
+                    [
+                        { text: "HTTPS", callback_data: `admin_panel_suburl_proto_${panelId}_https` },
+                        { text: "HTTP", callback_data: `admin_panel_suburl_proto_${panelId}_http` }
+                    ],
+                    [{ text: "همان پروتکل آدرس پنل", callback_data: `admin_panel_suburl_proto_${panelId}_def` }],
+                    [{ text: "❌ انصراف", callback_data: `admin_panel_open_${panelId}` }]
+                ]
+            }
+        });
+        return null;
+    }
+    const suburlProtoMatch = data.match(/^admin_panel_suburl_proto_(\d+)_(https|http|def)$/);
+    if (suburlProtoMatch) {
+        const panelId = Number(suburlProtoMatch[1]);
+        const protoKey = suburlProtoMatch[2];
+        if (!Number.isFinite(panelId) || panelId <= 0) {
+            await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+            return null;
+        }
+        const panel = await getPanelById(panelId);
+        if (!panel || String(panel.panel_type) !== "sanaei") {
+            await tg("sendMessage", { chat_id: chatId, text: "این گزینه فقط برای پنل Sanaei / 3x-ui است." });
+            return null;
+        }
+        const subscriptionLinkProtocol = protoKey === "def" ? null : protoKey;
+        await setState(userId, "admin_panel_suburl_host_edit", { panelId, subscriptionLinkProtocol });
+        await tg("sendMessage", {
+            chat_id: chatId,
+            text: `نام میزبان لینک ساب را بفرستید (بدون https://).\n` +
+                `پروتکل انتخاب‌شده: ${protoKey === "def" ? "همان آدرس پنل" : protoKey.toUpperCase()}\n\n` +
+                `0 یا auto = همان hostname آدرس پنل\n- = انصراف`,
+            reply_markup: { inline_keyboard: [[{ text: "❌ انصراف", callback_data: `admin_panel_open_${panelId}` }]] }
+        });
+        return null;
+    }
+    if (data.startsWith("admin_panel_set_confighost_")) {
+        const panelId = Number(data.replace("admin_panel_set_confighost_", ""));
+        if (!Number.isFinite(panelId) || panelId <= 0) {
+            await tg("sendMessage", { chat_id: chatId, text: "شناسه پنل نامعتبر است." });
+            return null;
+        }
+        const panel = await getPanelById(panelId);
+        if (!panel || String(panel.panel_type) !== "sanaei") {
+            await tg("sendMessage", { chat_id: chatId, text: "این گزینه فقط برای پنل Sanaei / 3x-ui است." });
+            return null;
+        }
+        const cur = String(panel.config_public_host || "").trim() || "تشخیص خودکار (محصول/پنل)";
+        await setState(userId, "admin_panel_confighost_edit", { panelId });
+        await tg("sendMessage", {
+            chat_id: chatId,
+            text: `🌐 دامنهٔ نمایش در لینک کانفیگ (vless/vmess/…)\nپنل: ${panel.name}\nفعلی: ${cur}\n\n` +
+                `فقط نام میزبان بفرستید (مثال: v-panel.example.com)\n` +
+                `0 یا auto = تشخیص خودکار\n- = انصراف`,
+            reply_markup: { inline_keyboard: [[{ text: "❌ انصراف", callback_data: `admin_panel_open_${panelId}` }]] }
+        });
+        return null;
     }
     if (data.startsWith("admin_panel_edit_")) {
         const panelId = Number(data.replace("admin_panel_edit_", ""));
         const panel = await getPanelById(panelId);
         if (!panel) {
             await tg("sendMessage", { chat_id: chatId, text: "پنل پیدا نشد." });
-            return;
+            return null;
         }
         await promptPanelTypePicker(chatId, "edit", panelId);
-        return;
+        return null;
     }
     if (data === "admin_panel_wizard_cancel") {
         await clearState(userId);
         await showPanelAdminMenu(chatId, "ثبت پنل لغو شد.");
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_wizard_cancel_")) {
         const panelId = Number(data.replace("admin_panel_wizard_cancel_", ""));
         await clearState(userId);
         await showPanelDetails(chatId, panelId, "ویرایش پنل لغو شد.");
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_pick_type_add_")) {
         const panelType = parsePanelType(data.replace("admin_panel_pick_type_add_", ""));
         if (!panelType) {
             await tg("sendMessage", { chat_id: chatId, text: "نوع پنل نامعتبر است." });
-            return;
+            return null;
         }
         await startPanelWizard(chatId, userId, "add", panelType);
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_pick_type_edit_")) {
         const payload = data.replace("admin_panel_pick_type_edit_", "");
@@ -11395,28 +12299,28 @@ async function handleCallback(update) {
         const panelType = parsePanelType(panelTypeRaw || "");
         if (!Number.isFinite(panelId) || panelId <= 0 || !panelType) {
             await tg("sendMessage", { chat_id: chatId, text: "اطلاعات ویرایش پنل نامعتبر است." });
-            return;
+            return null;
         }
         await startPanelWizard(chatId, userId, "edit", panelType, panelId);
-        return;
+        return null;
     }
     if (/^admin_panel_toggle_\d+$/.test(data)) {
         const panelId = Number(data.replace("admin_panel_toggle_", ""));
         await sql `UPDATE panels SET active = NOT active WHERE id = ${panelId};`;
-        await showPanelDetails(chatId, panelId, "وضعیت پنل تغییر کرد ✅");
-        return;
+        await showPanelDetails(chatId, panelId, "وضعیت پنل تغی��ر کرد ✅");
+        return null;
     }
     if (data.startsWith("admin_panel_toggle_move_")) {
         const panelId = Number(data.replace("admin_panel_toggle_move_", ""));
         await sql `UPDATE panels SET allow_customer_migration = NOT allow_customer_migration WHERE id = ${panelId};`;
         await showPanelDetails(chatId, panelId, "وضعیت مهاجرت کاربر تغییر کرد ✅");
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_toggle_sales_")) {
         const panelId = Number(data.replace("admin_panel_toggle_sales_", ""));
         await sql `UPDATE panels SET allow_new_sales = NOT allow_new_sales WHERE id = ${panelId};`;
         await showPanelDetails(chatId, panelId, "وضعیت فروش جدید این پنل تغییر کرد ✅");
-        return;
+        return null;
     }
     if (data === "admin_panel_test_all") {
         const rows = await sql `
@@ -11426,7 +12330,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "هنوز هیچ پنلی ثبت نشده است." });
-            return;
+            return null;
         }
         const results = [];
         let okCount = 0;
@@ -11437,13 +12341,13 @@ async function handleCallback(update) {
             results.push(`${row.name}: ${result.ok ? "✅" : "❌"}`);
         }
         await showPanelAdminMenu(chatId, `تست همه پنل‌ها انجام شد.\nموفق: ${okCount}/${rows.length}\n${results.join("\n")}`);
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_test_")) {
         const panelId = Number(data.replace("admin_panel_test_", ""));
         const result = await testPanelConnection(panelId);
         await showPanelDetails(chatId, panelId, result.message);
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_cache_")) {
         const panelId = Number(data.replace("admin_panel_cache_", ""));
@@ -11455,7 +12359,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "پنل پیدا نشد." });
-            return;
+            return null;
         }
         const p = rows[0];
         await tg("sendMessage", {
@@ -11469,7 +12373,7 @@ async function handleCallback(update) {
                 inline_keyboard: [[backButton(`admin_panel_open_${panelId}`, "🔙 بازگشت به پنل")]]
             }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_remove_yes_")) {
         const panelId = Number(data.replace("admin_panel_remove_yes_", ""));
@@ -11481,7 +12385,7 @@ async function handleCallback(update) {
             logError("admin_panel_delete_failed", err, { panelId, adminId: userId });
             await tg("sendMessage", { chat_id: chatId, text: `❌ حذف پنل با خطا مواجه شد. ممکن است کانفیگ‌ها یا محصولاتی به آن متصل باشند.\n${err.message}` });
         }
-        return;
+        return null;
     }
     if (data.startsWith("admin_panel_remove_")) {
         const panelId = Number(data.replace("admin_panel_remove_", ""));
@@ -11497,7 +12401,7 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data === "admin_dead_configs") {
         const token = generateAdminToken(userId);
@@ -11513,7 +12417,7 @@ async function handleCallback(update) {
                 `<code>${escapeHtml(link)}</code>`,
             parse_mode: "HTML"
         });
-        return;
+        return null;
     }
     if (data === "admin_migrations") {
         const rows = await sql `
@@ -11526,7 +12430,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "درخواست انتقال باز وجود ندارد." });
-            return;
+            return null;
         }
         const keyboard = rows.map((m) => [
             {
@@ -11536,7 +12440,7 @@ async function handleCallback(update) {
         ]);
         keyboard.push([backButton("admin_panels")]);
         await tg("sendMessage", { chat_id: chatId, text: "صف انتقال‌ها:", reply_markup: { inline_keyboard: keyboard } });
-        return;
+        return null;
     }
     if (data.startsWith("admin_migration_open_")) {
         const migrationId = Number(data.replace("admin_migration_open_", ""));
@@ -11555,7 +12459,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "درخواست یافت نشد." });
-            return;
+            return null;
         }
         const r = rows[0];
         await tg("sendMessage", {
@@ -11576,19 +12480,19 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_migration_auto_")) {
         const migrationId = Number(data.replace("admin_migration_auto_", ""));
         const result = await completeMigration(migrationId, userId, null);
         await tg("sendMessage", { chat_id: chatId, text: result.ok ? "انتقال انجام شد ✅" : `خطا: ${result.reason}` });
-        return;
+        return null;
     }
     if (data.startsWith("admin_migration_manual_")) {
         const migrationId = Number(data.replace("admin_migration_manual_", ""));
         await setState(userId, "admin_complete_migration_config", { migrationId });
         await tg("sendMessage", { chat_id: chatId, text: "کانفیگ جدید مقصد را ارسال کنید." });
-        return;
+        return null;
     }
     if (data.startsWith("admin_migration_reject_")) {
         const migrationId = Number(data.replace("admin_migration_reject_", ""));
@@ -11600,103 +12504,103 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "این درخواست قابل رد نیست." });
-            return;
+            return null;
         }
         await tg("sendMessage", { chat_id: Number(rows[0].requested_for), text: `درخواست انتقال #${migrationId} رد شد ❌` });
         await tg("sendMessage", { chat_id: chatId, text: "درخواست رد شد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_products") {
         await listProductsForAdmin(chatId, userId);
-        return;
+        return null;
     }
     if (data === "admin_products_show_archived") {
         await setSetting(`admin_products_show_archived_${userId}`, "true");
         await listProductsForAdmin(chatId, userId);
-        return;
+        return null;
     }
     if (data === "admin_products_hide_archived") {
         await setSetting(`admin_products_show_archived_${userId}`, "false");
         await listProductsForAdmin(chatId, userId);
-        return;
+        return null;
     }
     if (data === "admin_add_product") {
         await startProductWizard(chatId, userId, "add");
-        return;
+        return null;
     }
     if (data.startsWith("admin_edit_product_")) {
         const productId = Number(data.replace("admin_edit_product_", ""));
         await startProductWizard(chatId, userId, "edit", productId);
-        return;
+        return null;
     }
     if (data.startsWith("admin_product_wizard_cancel_")) {
         await clearState(userId);
         await tg("sendMessage", { chat_id: chatId, text: "ثبت/ویرایش محصول لغو شد." });
         await listProductsForAdmin(chatId, userId);
-        return;
+        return null;
     }
     if (data === "admin_product_wizard_price_auto") {
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_wizard")
-            return;
+            return null;
         if (parseProductKind(state.payload.productKind) === "account") {
             const payload = { ...state.payload, priceMode: "manual", step: "price_toman" };
             await setState(userId, "admin_product_wizard", payload);
             await promptProductWizardStep(chatId, payload);
-            return;
+            return null;
         }
         const payload = { ...state.payload, priceMode: "auto", step: "sell_mode" };
         await setState(userId, "admin_product_wizard", payload);
         await promptProductWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data === "admin_product_wizard_price_manual") {
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_wizard")
-            return;
+            return null;
         const payload = { ...state.payload, priceMode: "manual", step: "price_toman" };
         await setState(userId, "admin_product_wizard", payload);
         await promptProductWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data === "admin_product_wizard_sell_manual") {
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_wizard")
-            return;
+            return null;
         const payload = { ...state.payload, sellMode: "manual", step: "is_infinite" };
         await setState(userId, "admin_product_wizard", payload);
         await promptProductWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data === "admin_product_wizard_sell_panel") {
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_wizard")
-            return;
+            return null;
         if (parseProductKind(state.payload.productKind) === "account") {
             await tg("sendMessage", { chat_id: chatId, text: "برای محصول اکانتی، فروش از پنل غیرفعال است و فقط فروش دستی قابل انتخاب است." });
-            return;
+            return null;
         }
         const payload = { ...state.payload, sellMode: "panel", step: "panel_id" };
         await setState(userId, "admin_product_wizard", payload);
         await promptProductWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data === "admin_product_wizard_kind_v2ray" || data === "admin_product_wizard_kind_account") {
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_wizard")
-            return;
+            return null;
         const productKind = data === "admin_product_wizard_kind_account" ? "account" : "v2ray";
         const payload = productKind === "account"
             ? { ...state.payload, productKind, sizeMb: 0, priceMode: "manual", step: "price_mode" }
             : { ...state.payload, productKind, step: "size_mb" };
         await setState(userId, "admin_product_wizard", payload);
         await promptProductWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data === "admin_product_wizard_infinite_yes" || data === "admin_product_wizard_infinite_no") {
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_wizard")
-            return;
+            return null;
         const isInfinite = data === "admin_product_wizard_infinite_yes";
         const payload = { ...state.payload, isInfinite };
         const result = await saveProductWizard(payload);
@@ -11704,24 +12608,24 @@ async function handleCallback(update) {
         await tg("sendMessage", { chat_id: chatId, text: result.message });
         if (result.ok)
             await listProductsForAdmin(chatId, userId);
-        return;
+        return null;
     }
     if (data.startsWith("admin_product_wizard_panel_")) {
         const panelId = Number(data.replace("admin_product_wizard_panel_", ""));
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_wizard")
-            return;
+            return null;
         const payload = { ...state.payload, panelId, step: "panel_sell_limit" };
         await setState(userId, "admin_product_wizard", payload);
         await promptProductWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data.startsWith("admin_product_wizard_delivery_")) {
         const panelDeliveryMode = parseDeliveryMode(data.replace("admin_product_wizard_delivery_", ""));
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_wizard") {
             await tg("sendMessage", { chat_id: chatId, text: "جلسه افزودن/ویرایش محصول منقضی شده. دوباره از اول شروع کنید." });
-            return;
+            return null;
         }
         const payload = { ...state.payload, panelDeliveryMode };
         const result = await saveProductWizard(payload);
@@ -11729,26 +12633,26 @@ async function handleCallback(update) {
         await tg("sendMessage", { chat_id: chatId, text: result.message });
         if (result.ok)
             await listProductsForAdmin(chatId, userId);
-        return;
+        return null;
     }
     if (data.startsWith("admin_product_wizard_protocol_")) {
         const protocol = data.replace("admin_product_wizard_protocol_", "").trim().toLowerCase();
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_wizard")
-            return;
+            return null;
         const payload = { ...state.payload, protocol };
         const result = await saveProductWizard(payload);
         await clearState(userId);
         await tg("sendMessage", { chat_id: chatId, text: result.message });
         if (result.ok)
             await listProductsForAdmin(chatId, userId);
-        return;
+        return null;
     }
     if (data.startsWith("admin_toggle_product_infinite_")) {
         const productId = Number(data.replace("admin_toggle_product_infinite_", ""));
         await sql `UPDATE products SET is_infinite = NOT is_infinite WHERE id = ${productId};`;
         await tg("sendMessage", { chat_id: chatId, text: "حالت بینهایت محصول تغییر کرد ✅" });
-        return;
+        return null;
     }
     if (data.startsWith("admin_toggle_product_sell_mode_")) {
         const productId = Number(data.replace("admin_toggle_product_sell_mode_", ""));
@@ -11763,47 +12667,47 @@ async function handleCallback(update) {
             chat_id: chatId,
             text: rows.length ? `حالت فروش محصول روی ${rows[0].sell_mode === "panel" ? "فروش از پنل" : "فروش دستی"} قرار گرفت ✅` : "محصول پیدا نشد."
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_configure_product_panel_")) {
         const productId = Number(data.replace("admin_configure_product_panel_", ""));
         const product = await getProductForPanelWizard(productId);
         if (!product) {
             await tg("sendMessage", { chat_id: chatId, text: "محصول پیدا نشد." });
-            return;
+            return null;
         }
         const payload = productPanelWizardPayload(product);
         await setState(userId, "admin_product_panel_wizard", payload);
         await promptProductPanelWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data.startsWith("admin_product_panel_wizard_cancel_")) {
         await clearState(userId);
         await tg("sendMessage", { chat_id: chatId, text: "تنظیم فروش پنل لغو شد." });
         await listProductsForAdmin(chatId, userId);
-        return;
+        return null;
     }
     if (data.startsWith("admin_product_panel_pick_")) {
         const panelId = Number(data.replace("admin_product_panel_pick_", ""));
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_panel_wizard") {
             await tg("sendMessage", { chat_id: chatId, text: "جلسه تنظیم منقضی شده. دوباره از لیست محصولات شروع کنید." });
-            return;
+            return null;
         }
         if (!Number.isFinite(panelId) || panelId <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "پنل نامعتبر است." });
-            return;
+            return null;
         }
         const payload = { ...state.payload, panelId, step: "mode" };
         await setState(userId, "admin_product_panel_wizard", payload);
         await promptProductPanelWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data === "admin_product_panel_quick") {
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_panel_wizard") {
             await tg("sendMessage", { chat_id: chatId, text: "جلسه تنظیم منقضی شده. دوباره تلاش کنید." });
-            return;
+            return null;
         }
         const result = await saveProductPanelWizard(state.payload, true);
         await clearState(userId);
@@ -11811,47 +12715,47 @@ async function handleCallback(update) {
         if (result.ok) {
             await listProductsForAdmin(chatId, userId);
         }
-        return;
+        return null;
     }
     if (data === "admin_product_panel_custom") {
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_panel_wizard") {
             await tg("sendMessage", { chat_id: chatId, text: "جلسه تنظیم منقضی شده. دوباره تلاش کنید." });
-            return;
+            return null;
         }
         const payload = { ...state.payload, step: "sell_limit" };
         await setState(userId, "admin_product_panel_wizard", payload);
         await promptProductPanelWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data.startsWith("admin_product_panel_delivery_")) {
         const mode = data.replace("admin_product_panel_delivery_", "");
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_panel_wizard") {
             await tg("sendMessage", { chat_id: chatId, text: "جلسه تنظیم منقضی شده. دوباره تلاش کنید." });
-            return;
+            return null;
         }
         const panelDeliveryMode = parseDeliveryMode(mode);
         const payload = { ...state.payload, panelDeliveryMode, step: "inbound_id" };
         await setState(userId, "admin_product_panel_wizard", payload);
         await promptProductPanelWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data.startsWith("admin_product_panel_protocol_")) {
         const protocol = data.replace("admin_product_panel_protocol_", "").trim().toLowerCase();
         const state = await getState(userId);
         if (!state || state.state !== "admin_product_panel_wizard") {
             await tg("sendMessage", { chat_id: chatId, text: "جلسه تنظیم منقضی شده. دوباره تلاش کنید." });
-            return;
+            return null;
         }
         if (!protocol) {
             await tg("sendMessage", { chat_id: chatId, text: "پروتکل نامعتبر است." });
-            return;
+            return null;
         }
         const payload = { ...state.payload, protocol, step: "expire_days" };
         await setState(userId, "admin_product_panel_wizard", payload);
         await promptProductPanelWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data.startsWith("admin_remove_product_yes_")) {
         const productId = Number(data.replace("admin_remove_product_yes_", ""));
@@ -11879,7 +12783,7 @@ async function handleCallback(update) {
                     (archived.length ? `نام جدید: ${archived[0].name}` : "")
             });
             await listProductsForAdmin(chatId, userId);
-            return;
+            return null;
         }
         try {
             const deleted = await sql `
@@ -11889,7 +12793,7 @@ async function handleCallback(update) {
       `;
             if (!deleted.length) {
                 await tg("sendMessage", { chat_id: chatId, text: "محصول پیدا نشد یا قبلاً حذف شده است." });
-                return;
+                return null;
             }
             await tg("sendMessage", { chat_id: chatId, text: `محصول «${deleted[0].name}» حذف شد ✅` });
             await listProductsForAdmin(chatId, userId);
@@ -11898,14 +12802,14 @@ async function handleCallback(update) {
             logError("admin_delete_product_failed", err, { productId, adminId: userId });
             await tg("sendMessage", { chat_id: chatId, text: `❌ حذف محصول با خطا مواجه شد. ممکن است دیتایی به آن وابسته باشد.\n${err.message}` });
         }
-        return;
+        return null;
     }
     if (data.startsWith("admin_remove_product_")) {
         const productId = Number(data.replace("admin_remove_product_", ""));
         const rows = await sql `SELECT name FROM products WHERE id = ${productId} LIMIT 1;`;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "محصول پیدا نشد." });
-            return;
+            return null;
         }
         await tg("sendMessage", {
             chat_id: chatId,
@@ -11919,17 +12823,17 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_toggle_product_")) {
         const productId = Number(data.replace("admin_toggle_product_", ""));
         await sql `UPDATE products SET is_active = NOT is_active WHERE id = ${productId};`;
         await tg("sendMessage", { chat_id: chatId, text: "وضعیت محصول تغییر کرد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_inventory") {
         await showProducts(chatId, false);
-        return;
+        return null;
     }
     if (data.startsWith("admin_inventory_product_")) {
         const productId = Number(data.replace("admin_inventory_product_", ""));
@@ -11954,7 +12858,7 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_add_stock_")) {
         const productId = Number(data.replace("admin_add_stock_", ""));
@@ -11968,7 +12872,7 @@ async function handleCallback(update) {
                 "vless://...\n" +
                 "trojan://..."
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_sold_list_")) {
         const productId = Number(data.replace("admin_sold_list_", ""));
@@ -11982,7 +12886,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "لیست فروش خالی است." });
-            return;
+            return null;
         }
         for (const row of rows) {
             const payload = parseDeliveryPayload(row.delivery_payload);
@@ -12004,14 +12908,14 @@ async function handleCallback(update) {
                 }
             });
         }
-        return;
+        return null;
     }
     if (data.startsWith("admin_inv_revoke_")) {
         const inventoryId = Number(data.replace("admin_inv_revoke_", ""));
         const rows = await sql `SELECT delivery_payload, owner_telegram_id FROM inventory WHERE id = ${inventoryId} LIMIT 1;`;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "کانفیگ پیدا نشد." });
-            return;
+            return null;
         }
         const payload = parseDeliveryPayload(rows[0].delivery_payload);
         const revoked = payload.metadata?.revoked === true;
@@ -12035,13 +12939,13 @@ async function handleCallback(update) {
             logError("inventory_revoke_notify_failed", error, { inventoryId });
         }
         await tg("sendMessage", { chat_id: chatId, text: !revoked ? "غیرفعال شد ✅" : "فعال شد ✅" });
-        return;
+        return null;
     }
     if (data.startsWith("admin_inv_rename_")) {
         const inventoryId = Number(data.replace("admin_inv_rename_", ""));
         await setState(userId, "admin_inv_rename", { inventoryId });
         await tg("sendMessage", { chat_id: chatId, text: "نام جدید کانفیگ را ارسال کنید. (برای حذف نام: -)" });
-        return;
+        return null;
     }
     if (data.startsWith("admin_available_list_")) {
         const productId = Number(data.replace("admin_available_list_", ""));
@@ -12054,7 +12958,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "موردی برای حذف وجود ندارد." });
-            return;
+            return null;
         }
         await tg("sendMessage", { chat_id: chatId, text: "برای حذف هر کانفیگ روی دکمه «حذف» بزنید:" });
         for (const row of rows) {
@@ -12067,7 +12971,7 @@ async function handleCallback(update) {
                 }
             });
         }
-        return;
+        return null;
     }
     if (data.startsWith("admin_delete_inventory_")) {
         const inventoryId = Number(data.replace("admin_delete_inventory_", ""));
@@ -12097,7 +13001,7 @@ async function handleCallback(update) {
             logError("admin_delete_available_inventory_failed", err, { inventoryId, adminId: userId });
             await tg("sendMessage", { chat_id: chatId, text: `❌ حذف کانفیگ با خطا مواجه شد.\n${err.message}` });
         }
-        return;
+        return null;
     }
     if (data === "admin_discounts") {
         const rows = await sql `SELECT id, code, type, amount, active, usage_limit, used_count FROM discounts ORDER BY id DESC LIMIT 30;`;
@@ -12112,49 +13016,49 @@ async function handleCallback(update) {
         keyboard.push([cb("➕ افزودن تخفیف", "admin_add_discount", "success")]);
         keyboard.push([backButton("admin_panel")]);
         await tg("sendMessage", { chat_id: chatId, text: "مدیریت تخفیف:", reply_markup: { inline_keyboard: keyboard } });
-        return;
+        return null;
     }
     if (data === "admin_add_discount") {
         await startDiscountWizard(chatId, userId, "add");
-        return;
+        return null;
     }
     if (data.startsWith("admin_edit_discount_")) {
         const discountId = Number(data.replace("admin_edit_discount_", ""));
         await startDiscountWizard(chatId, userId, "edit", discountId);
-        return;
+        return null;
     }
     if (data.startsWith("admin_discount_wizard_cancel_")) {
         await clearState(userId);
         await tg("sendMessage", { chat_id: chatId, text: "ثبت/ویرایش تخفیف لغو شد." });
-        return;
+        return null;
     }
     if (data === "admin_discount_wizard_code_random") {
         const state = await getState(userId);
         if (!state || state.state !== "admin_discount_wizard")
-            return;
+            return null;
         const payload = { ...state.payload, code: randomCode(10), step: "type" };
         await setState(userId, "admin_discount_wizard", payload);
         await promptDiscountWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data === "admin_discount_wizard_code_manual") {
         const state = await getState(userId);
         if (!state || state.state !== "admin_discount_wizard")
-            return;
+            return null;
         const payload = { ...state.payload, step: "code" };
         await setState(userId, "admin_discount_wizard", payload);
         await promptDiscountWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data === "admin_discount_wizard_type_percent" || data === "admin_discount_wizard_type_fixed") {
         const state = await getState(userId);
         if (!state || state.state !== "admin_discount_wizard")
-            return;
+            return null;
         const type = data.endsWith("_percent") ? "percent" : "fixed";
         const payload = { ...state.payload, type, step: "amount" };
         await setState(userId, "admin_discount_wizard", payload);
         await promptDiscountWizardStep(chatId, payload);
-        return;
+        return null;
     }
     if (data.startsWith("admin_delete_discount_")) {
         const discountId = Number(data.replace("admin_delete_discount_", ""));
@@ -12166,26 +13070,26 @@ async function handleCallback(update) {
             logError("admin_delete_discount_failed", err, { discountId, adminId: userId });
             await tg("sendMessage", { chat_id: chatId, text: `❌ حذف تخفیف با خطا مواجه شد.\n${err.message}` });
         }
-        return;
+        return null;
     }
     if (data.startsWith("admin_toggle_discount_")) {
         const discountId = Number(data.replace("admin_toggle_discount_", ""));
         await sql `UPDATE discounts SET active = NOT active WHERE id = ${discountId};`;
         await tg("sendMessage", { chat_id: chatId, text: "وضعیت تخفیف تغییر کرد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_payment_methods") {
         const rows = await sql `SELECT code, title, active FROM payment_methods ORDER BY code ASC;`;
         const keyboard = rows.map((m) => [cb(`${m.title} | ${m.active ? "فعال" : "غیرفعال"}`, `admin_toggle_method_${m.code}`, m.active ? "danger" : "success")]);
         keyboard.push([backButton("admin_panel")]);
         await tg("sendMessage", { chat_id: chatId, text: "مدیریت روش‌های پرداخت:", reply_markup: { inline_keyboard: keyboard } });
-        return;
+        return null;
     }
     if (data.startsWith("admin_toggle_method_")) {
         const code = data.replace("admin_toggle_method_", "");
         await sql `UPDATE payment_methods SET active = NOT active WHERE code = ${code};`;
         await tg("sendMessage", { chat_id: chatId, text: "روش پرداخت بروزرسانی شد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_cards") {
         const randomMode = await getBoolSetting("random_card_distribution", false);
@@ -12226,38 +13130,38 @@ async function handleCallback(update) {
         keyboard.push([cb(randomMode ? "🎲 پخش رندوم: روشن" : "🎲 پخش رندوم: خاموش", "admin_toggle_random_cards", randomMode ? "success" : "primary")]);
         keyboard.push([backButton("admin_panel")]);
         await tg("sendMessage", { chat_id: chatId, text: "مدیریت کارت‌ها:", reply_markup: { inline_keyboard: keyboard } });
-        return;
+        return null;
     }
     if (data === "admin_add_card") {
         await startCardWizard(chatId, userId, "add");
-        return;
+        return null;
     }
     if (data.startsWith("admin_edit_card_")) {
         const cardId = Number(data.replace("admin_edit_card_", ""));
         await startCardWizard(chatId, userId, "edit", cardId);
-        return;
+        return null;
     }
     if (data.startsWith("admin_card_wizard_cancel_")) {
         await clearState(userId);
         await tg("sendMessage", { chat_id: chatId, text: "ثبت/ویرایش کارت لغو شد." });
-        return;
+        return null;
     }
     if (data.startsWith("admin_toggle_card_")) {
         const cardId = Number(data.replace("admin_toggle_card_", ""));
         await sql `UPDATE cards SET active = NOT active WHERE id = ${cardId};`;
         await tg("sendMessage", { chat_id: chatId, text: "وضعیت کارت تغییر کرد ✅" });
-        return;
+        return null;
     }
     if (data.startsWith("admin_set_main_card_")) {
         const cardId = Number(data.replace("admin_set_main_card_", ""));
         const rows = await sql `SELECT id FROM cards WHERE id = ${cardId} AND active = TRUE LIMIT 1;`;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "فقط کارت فعال می‌تواند کارت اصلی باشد." });
-            return;
+            return null;
         }
         await setSetting("main_card_id", String(cardId));
         await tg("sendMessage", { chat_id: chatId, text: "کارت اصلی تعیین شد ✅" });
-        return;
+        return null;
     }
     if (data.startsWith("admin_remove_card_")) {
         const cardId = Number(data.replace("admin_remove_card_", ""));
@@ -12269,13 +13173,13 @@ async function handleCallback(update) {
             logError("admin_remove_card_failed", err, { cardId, adminId: userId });
             await tg("sendMessage", { chat_id: chatId, text: `❌ حذف کارت با خطا مواجه شد.\n${err.message}` });
         }
-        return;
+        return null;
     }
     if (data === "admin_toggle_random_cards") {
         const current = await getBoolSetting("random_card_distribution", false);
         await setSetting("random_card_distribution", (!current).toString());
         await tg("sendMessage", { chat_id: chatId, text: `پخش رندوم کارت ${!current ? "فعال" : "غیرفعال"} شد ✅` });
-        return;
+        return null;
     }
     if (data.startsWith("wallet_accept_")) {
         const topupId = Number(data.replace("wallet_accept_", ""));
@@ -12287,7 +13191,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "این درخواست قابل تایید نیست یا قبلاً بررسی شده است." });
-            return;
+            return null;
         }
         await sql `
       UPDATE users
@@ -12303,7 +13207,7 @@ async function handleCallback(update) {
             text: `رسید شارژ کیف پول تایید شد ✅\nمبلغ ${formatPriceToman(Number(rows[0].amount))} تومان به کیف پول شما اضافه شد.`
         });
         await tg("sendMessage", { chat_id: chatId, text: "رسید تایید شد و کیف پول کاربر شارژ شد ✅" });
-        return;
+        return null;
     }
     if (data.startsWith("wallet_deny_")) {
         const topupId = Number(data.replace("wallet_deny_", ""));
@@ -12315,11 +13219,11 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "این درخواست قابل رد نیست یا قبلاً بررسی شده است." });
-            return;
+            return null;
         }
         await tg("sendMessage", { chat_id: Number(rows[0].telegram_id), text: `رسید شارژ کیف پول شما رد شد ❌` });
         await tg("sendMessage", { chat_id: chatId, text: "رد شد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_manage_users") {
         await setState(userId, "admin_manage_users");
@@ -12328,7 +13232,7 @@ async function handleCallback(update) {
             text: "لطفاً آیدی عددی (Telegram ID) یا یوزرنیم (با @ یا بدون @) کاربر موردنظر را ارسال کنید:",
             reply_markup: { inline_keyboard: [[backButton("admin_panel")]] }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_wallet_add_")) {
         const targetUserId = Number(data.replace("admin_wallet_add_", ""));
@@ -12338,7 +13242,7 @@ async function handleCallback(update) {
             text: "مبلغی که می‌خواهید به کیف پول این کاربر اضافه کنید را به تومان وارد کنید:",
             reply_markup: { inline_keyboard: [[backButton("admin_manage_users")]] }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_wallet_sub_")) {
         const targetUserId = Number(data.replace("admin_wallet_sub_", ""));
@@ -12348,7 +13252,7 @@ async function handleCallback(update) {
             text: "مبلغی که می‌خواهید از کیف پول این کاربر کم کنید را به تومان وارد کنید:",
             reply_markup: { inline_keyboard: [[backButton("admin_manage_users")]] }
         });
-        return;
+        return null;
     }
     if (data === "admin_stats") {
         const m1 = await sql `
@@ -12413,7 +13317,7 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data === "admin_stats_buyers") {
         const rows = await sql `
@@ -12432,14 +13336,14 @@ async function handleCallback(update) {
             text: "یک محصول را انتخاب کنید:",
             reply_markup: { inline_keyboard: keyboard }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_stats_buyers_product_")) {
         const productId = Number(data.replace("admin_stats_buyers_product_", ""));
         const productRows = await sql `SELECT name FROM products WHERE id = ${productId} LIMIT 1;`;
         if (!productRows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "محصول یافت نشد." });
-            return;
+            return null;
         }
         const rows = await sql `
       SELECT
@@ -12462,7 +13366,7 @@ async function handleCallback(update) {
                 text: `برای محصول «${productRows[0].name}» هنوز مشتری ثبت نشده است.`,
                 reply_markup: { inline_keyboard: [[backButton("admin_stats_buyers")]] }
             });
-            return;
+            return null;
         }
         const lines = rows.map((r, idx) => {
             const username = r.username ? `@${String(r.username)}` : "-";
@@ -12474,14 +13378,16 @@ async function handleCallback(update) {
             text: `مشتریان محصول: ${productRows[0].name}\n\n${lines.join("\n")}`,
             reply_markup: { inline_keyboard: [[backButton("admin_stats_buyers")]] }
         });
-        return;
+        return null;
     }
     if (data === "admin_tools") {
+        const currentAdmins = await getAdminIds();
         await tg("sendMessage", {
             chat_id: chatId,
-            text: "ابزارهای سریع ادمین:",
+            text: `ابزارهای سریع ادمین:\n\nادمین‌های فعلی: ${currentAdmins.length > 0 ? currentAdmins.join(", ") : "ندارد"}`,
             reply_markup: {
                 inline_keyboard: [
+                    [cb("👑 افزودن ادمین", "admin_tool_add_admin", "success"), cb("🚫 حذف ادمین", "admin_tool_remove_admin", "danger")],
                     [cb("⛔ بن با یوزرنیم", "admin_tool_ban_username", "danger")],
                     [cb("✉️ ارسال پیام به کاربر", "admin_tool_message_user", "primary")],
                     [cb("🔎 جستجوی شماره سفارش", "admin_tool_lookup_purchase", "primary")],
@@ -12495,26 +13401,80 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
+    }
+    if (data === "admin_tool_add_admin") {
+        await setState(userId, "admin_add_admin");
+        await tg("sendMessage", {
+            chat_id: chatId,
+            text: "لطفاً آیدی عددی (Telegram ID) کاربری که می‌خواهید ادمین کنید را ارسال کنید:",
+            reply_markup: { inline_keyboard: [[backButton("admin_tools")]] }
+        });
+        return null;
+    }
+    if (data === "admin_tool_remove_admin") {
+        const currentAdmins = await getAdminIds();
+        const envIds = String(process.env.ADMIN_IDS || "")
+            .split(",")
+            .map((x) => Number(x.trim()))
+            .filter((x) => Number.isFinite(x));
+        // Only show removable admins (ones that are in settings, not env)
+        const removableAdmins = currentAdmins.filter(id => !envIds.includes(id));
+        if (removableAdmins.length === 0) {
+            await tg("sendMessage", {
+                chat_id: chatId,
+                text: "هیچ ادمین قابل حذفی وجود ندارد.\n(ادمین‌های تعریف شده در ADMIN_IDS قابل حذف از اینجا نیستند)",
+                reply_markup: { inline_keyboard: [[backButton("admin_tools")]] }
+            });
+            return null;
+        }
+        const keyboard = removableAdmins.map(id => [cb(`حذف ${id}`, `admin_confirm_remove_admin_${id}`, "danger")]);
+        keyboard.push([backButton("admin_tools")]);
+        await tg("sendMessage", {
+            chat_id: chatId,
+            text: "کدام ادمین را می‌خواهید حذف کنید؟",
+            reply_markup: { inline_keyboard: keyboard }
+        });
+        return null;
+    }
+    if (data.startsWith("admin_confirm_remove_admin_")) {
+        const adminIdToRemove = Number(data.replace("admin_confirm_remove_admin_", ""));
+        if (!Number.isFinite(adminIdToRemove) || adminIdToRemove <= 0) {
+            await tg("sendMessage", { chat_id: chatId, text: "آیدی نامعتبر است." });
+            return null;
+        }
+        // Get current admin_ids from settings
+        const currentSetting = (await getSetting("admin_ids")) || "";
+        const currentIds = String(currentSetting)
+            .split(/[,\s]+/)
+            .map((x) => Number(x.trim()))
+            .filter((x) => Number.isFinite(x) && x !== adminIdToRemove);
+        await setSetting("admin_ids", currentIds.join(","));
+        await tg("sendMessage", {
+            chat_id: chatId,
+            text: `ادمین ${adminIdToRemove} حذف شد ✅`,
+            reply_markup: { inline_keyboard: [[backButton("admin_tools")]] }
+        });
+        return null;
     }
     if (data === "admin_tool_ban_username") {
         await setState(userId, "admin_ban_username");
         await tg("sendMessage", { chat_id: chatId, text: "یوزرنیم را با یا بدون @ ارسال کنید." });
-        return;
+        return null;
     }
     if (data === "admin_tool_message_user") {
         await startMessageUserWizard(chatId, userId);
-        return;
+        return null;
     }
     if (data === "admin_message_user_wizard_cancel") {
         await clearState(userId);
         await tg("sendMessage", { chat_id: chatId, text: "ارسال پیام لغو شد." });
-        return;
+        return null;
     }
     if (data === "admin_tool_lookup_purchase") {
         await setState(userId, "admin_lookup_purchase");
         await tg("sendMessage", { chat_id: chatId, text: "شماره سفارش را ارسال کنید. مثال: P123... یا T123..." });
-        return;
+        return null;
     }
     if (data === "admin_tool_lookup_config") {
         await setState(userId, "admin_lookup_config");
@@ -12524,25 +13484,25 @@ async function handleCallback(update) {
                 "بعد از پیدا شدن نتیجه می‌توانید از همان پیام:\n" +
                 "➕ افزودن دیتا | ♻️ ریست دیتا | 📅 تنظیم/حذف انقضا | 🚫 لغو دسترسی | 🗑 حذف کامل"
         });
-        return;
+        return null;
     }
     if (data === "admin_tool_create_config") {
         await startAdminConfigBuilderWizard(chatId, userId);
-        return;
+        return null;
     }
     if (data === "admin_config_builder_cancel") {
         await clearState(userId);
         await tg("sendMessage", { chat_id: chatId, text: "ساخت کانفیگ سفارشی لغو شد." });
-        return;
+        return null;
     }
     if (data.startsWith("admin_config_builder_panel_")) {
         const panelId = Number(data.replace("admin_config_builder_panel_", ""));
         const state = await getState(userId);
         if (!state || state.state !== "admin_config_builder_wizard")
-            return;
+            return null;
         if (!Number.isFinite(panelId) || panelId <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "پنل نامعتبر است." });
-            return;
+            return null;
         }
         const payload = {
             ...state.payload,
@@ -12552,19 +13512,19 @@ async function handleCallback(update) {
         await setState(userId, "admin_config_builder_wizard", payload);
         await tg("sendMessage", {
             chat_id: chatId,
-            text: "ساخت کانفیگ سفارشی - مرحله 3 از 5\nنام کانفیگ را بفرستید. (اختیاری)\nبرای ردشدن: -",
+            text: "ساخت کانفیگ سفارشی - مرحله 3 از 5\nنام ��انفیگ را بفرستید. (اختیاری)\nبرای ردشدن: -",
             reply_markup: { inline_keyboard: [[cancelButton("admin_config_builder_cancel")]] }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_open_purchase_")) {
         const purchaseId = data.replace("admin_open_purchase_", "").trim();
         if (!purchaseId) {
             await tg("sendMessage", { chat_id: chatId, text: "شماره سفارش نامعتبر است." });
-            return;
+            return null;
         }
         await sendPurchaseLookupResult(chatId, purchaseId);
-        return;
+        return null;
     }
     if (data.startsWith("admin_banned_list_")) {
         const page = Math.max(1, Math.round(Number(data.replace("admin_banned_list_", "")) || 1));
@@ -12580,7 +13540,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "لیست بن‌شده‌ها خالی است.", reply_markup: { inline_keyboard: [[backButton("admin_tools")]] } });
-            return;
+            return null;
         }
         const lines = rows.map((r) => {
             const uname = r.username ? `@${String(r.username)}` : "-";
@@ -12595,16 +13555,16 @@ async function handleCallback(update) {
         keyboard.push([cb("🔓 آنبن کاربر", "admin_unban_prompt", "success")]);
         keyboard.push([backButton("admin_tools")]);
         await tg("sendMessage", { chat_id: chatId, text: `لیست بن‌شده‌ها (صفحه ${page})\n\n${lines.join("\n")}`, reply_markup: { inline_keyboard: keyboard } });
-        return;
+        return null;
     }
     if (data === "admin_unban_prompt") {
         await setState(userId, "admin_unban_user");
         await tg("sendMessage", { chat_id: chatId, text: "telegram_id کاربر را برای آنبن ارسال کنید." });
-        return;
+        return null;
     }
     if (data === "admin_tool_direct_migrate") {
         await startDirectMigrateWizard(chatId, userId);
-        return;
+        return null;
     }
     if (data === "admin_reset_all_prompt") {
         await clearState(userId);
@@ -12622,7 +13582,7 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data === "admin_reset_all_begin") {
         await setState(userId, "admin_reset_all_data");
@@ -12632,18 +13592,18 @@ async function handleCallback(update) {
                 "RESET ALL DATA\n\n" +
                 "بعد از ارسال این عبارت، همه داده‌های عملیاتی حذف می‌شوند و فقط کش حفظ خواهد شد."
         });
-        return;
+        return null;
     }
     if (data === "admin_direct_migrate_wizard_cancel") {
         await clearState(userId);
         await tg("sendMessage", { chat_id: chatId, text: "انتقال مستقیم لغو شد." });
-        return;
+        return null;
     }
     if (data.startsWith("admin_direct_migrate_panel_")) {
         const targetPanelId = Number(data.replace("admin_direct_migrate_panel_", ""));
         const state = await getState(userId);
         if (!state || state.state !== "admin_direct_migrate_wizard")
-            return;
+            return null;
         const payload = { ...state.payload, targetPanelId, step: "user_telegram_id" };
         await setState(userId, "admin_direct_migrate_wizard", payload);
         await tg("sendMessage", {
@@ -12651,7 +13611,7 @@ async function handleCallback(update) {
             text: "انتقال مستقیم - مرحله 3 از 4\ntelegram id کاربر مقصد را بفرستید.",
             reply_markup: { inline_keyboard: [[cancelButton("admin_direct_migrate_wizard_cancel")]] }
         });
-        return;
+        return null;
     }
     if (data === "admin_settings") {
         const support = await getSetting("support_username");
@@ -12712,42 +13672,42 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data === "admin_referral_settings") {
         await showAdminReferralSettings(chatId);
-        return;
+        return null;
     }
     if (data === "admin_toggle_referral_enabled") {
         const current = await getBoolSetting("referral_enabled", false);
         await setSetting("referral_enabled", (!current).toString());
         await tg("sendMessage", { chat_id: chatId, text: `سیستم دعوت ${!current ? "فعال" : "غیرفعال"} شد ✅` });
-        return;
+        return null;
     }
     if (data === "admin_set_referral_threshold") {
         await setState(userId, "admin_set_referral_threshold");
         await tg("sendMessage", { chat_id: chatId, text: "تعداد دعوت لازم برای هر جایزه را ارسال کنید.\nمثال: 5" });
-        return;
+        return null;
     }
     if (data === "admin_set_referral_wallet_amount") {
         await setState(userId, "admin_set_referral_wallet_amount");
         await tg("sendMessage", { chat_id: chatId, text: "مبلغ جایزه کیف پول را به تومان ارسال کنید.\nمثال: 50000" });
-        return;
+        return null;
     }
     if (data === "admin_referral_reward_wallet") {
         await setSetting("referral_reward_type", "wallet");
         await tg("sendMessage", { chat_id: chatId, text: "نوع جایزه دعوت روی اعتبار کیف پول تنظیم شد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_referral_reward_config") {
         await setSetting("referral_reward_type", "config");
         await tg("sendMessage", { chat_id: chatId, text: "نوع جایزه دعوت روی کانفیگ تنظیم شد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_referral_delivery_panel") {
         await setSetting("referral_config_delivery_mode", "panel");
         await tg("sendMessage", { chat_id: chatId, text: "روش تحویل جایزه کانفیگ روی پنل تنظیم شد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_referral_delivery_storage") {
         await setSetting("referral_config_delivery_mode", "admin");
@@ -12755,33 +13715,33 @@ async function handleCallback(update) {
             chat_id: chatId,
             text: "این گزینه به حالت جدید منتقل شد ✅\nروش تحویل: دستی (اولویت انبار، در صورت خالی بودن تحویل دستی ادمین)"
         });
-        return;
+        return null;
     }
     if (data === "admin_referral_delivery_admin") {
         await setSetting("referral_config_delivery_mode", "admin");
         await tg("sendMessage", { chat_id: chatId, text: "روش تحویل جایزه کانفیگ روی تحویل دستی ادمین تنظیم شد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_referral_pick_product") {
         await showAdminReferralProductPicker(chatId);
-        return;
+        return null;
     }
     if (data === "admin_referral_clear_product") {
         await setSetting("referral_reward_product_id", "");
         await tg("sendMessage", { chat_id: chatId, text: "محصول جایزه دعوت پاک شد ✅" });
-        return;
+        return null;
     }
     if (data.startsWith("admin_referral_product_")) {
         const productId = Number(data.replace("admin_referral_product_", ""));
         const rows = await sql `SELECT name FROM products WHERE id = ${productId} LIMIT 1;`;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "محصول موردنظر پیدا نشد." });
-            return;
+            return null;
         }
         await setSetting("referral_reward_type", "config");
         await setSetting("referral_reward_product_id", String(productId));
         await tg("sendMessage", { chat_id: chatId, text: `محصول جایزه دعوت تنظیم شد ✅\n${String(rows[0].name)}` });
-        return;
+        return null;
     }
     if (data === "admin_start_media") {
         const kindRaw = ((await getSetting("start_media_kind")) || "none");
@@ -12805,7 +13765,7 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data === "admin_custom_v2ray_menu") {
         const enabled = await getBoolSetting("custom_v2ray_enabled", false);
@@ -12843,7 +13803,7 @@ async function handleCallback(update) {
                 `نکته: نوع تحویل (فروش از پنل یا دستی) از طریق ویرایش همین محصول تعیین می‌شود.`,
             reply_markup: { inline_keyboard: keyboard }
         });
-        return;
+        return null;
     }
     if (data === "admin_custom_v2ray_toggle") {
         const current = await getBoolSetting("custom_v2ray_enabled", false);
@@ -12851,12 +13811,12 @@ async function handleCallback(update) {
             const ensured = await ensureCustomV2rayProduct();
             if (!ensured.ok) {
                 await tg("sendMessage", { chat_id: chatId, text: "خطا در ساخت/آماده‌سازی محصول سفارشی." });
-                return;
+                return null;
             }
             await sql `UPDATE products SET is_active = TRUE WHERE id = ${ensured.productId};`;
             await setSetting("custom_v2ray_enabled", "true");
             await tg("sendMessage", { chat_id: chatId, text: "سفارشی روشن شد ✅" });
-            return;
+            return null;
         }
         const productId = Number((await getSetting("custom_v2ray_product_id")) || 0);
         if (Number.isFinite(productId) && productId > 0) {
@@ -12864,19 +13824,19 @@ async function handleCallback(update) {
         }
         await setSetting("custom_v2ray_enabled", "false");
         await tg("sendMessage", { chat_id: chatId, text: "سفارشی خاموش شد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_start_media_disable") {
         await setSetting("start_media_kind", "none");
         await setSetting("start_media_value", "");
         await tg("sendMessage", { chat_id: chatId, text: "مدیای شروع خاموش شد ✅" });
-        return;
+        return null;
     }
     if (data.startsWith("admin_start_media_set_")) {
         const kind = data.replace("admin_start_media_set_", "").trim();
         if (kind !== "text" && kind !== "sticker" && kind !== "animation" && kind !== "photo") {
             await tg("sendMessage", { chat_id: chatId, text: "گزینه نامعتبر است." });
-            return;
+            return null;
         }
         await setState(userId, "admin_set_start_media", { kind });
         const hints = kind === "text"
@@ -12887,7 +13847,7 @@ async function handleCallback(update) {
                     ? "گیف را ارسال کن.\nبرای پاک‌کردن: -"
                     : "عکس را ارسال کن.\nبرای پاک‌کردن: -";
         await tg("sendMessage", { chat_id: chatId, text: `🎬 تنظیم مدیای شروع\n\n${hints}` });
-        return;
+        return null;
     }
     if (data === "admin_set_mandatory_channels") {
         await setState(userId, "admin_set_mandatory_channels");
@@ -12901,17 +13861,17 @@ async function handleCallback(update) {
                 `وضعیت فعلی:\n<code>${escapeHtml(current || "خاموش")}</code>`,
             parse_mode: "HTML"
         });
-        return;
+        return null;
     }
     if (data === "admin_set_support") {
         await setState(userId, "admin_set_support");
         await tg("sendMessage", { chat_id: chatId, text: "یوزرنیم پشتیبانی را بدون @ ارسال کنید." });
-        return;
+        return null;
     }
     if (data === "admin_set_wallet") {
         await setState(userId, "admin_set_wallet");
         await tg("sendMessage", { chat_id: chatId, text: "آدرس کیف پول مقصد را ارسال کنید." });
-        return;
+        return null;
     }
     if (data === "admin_gateway_settings") {
         const publicBaseUrl = await getPublicBaseUrl(env.PUBLIC_BASE_URL);
@@ -12956,7 +13916,7 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data === "admin_crypto_wallets") {
         const wallets = await sql `
@@ -12990,7 +13950,7 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data === "admin_crypto_wallet_add") {
         await tg("sendMessage", {
@@ -13007,7 +13967,7 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_crypto_wallet_add_") && data !== "admin_crypto_wallet_add_other") {
         const payload = data.replace("admin_crypto_wallet_add_", "");
@@ -13023,12 +13983,12 @@ async function handleCallback(update) {
         const walletId = Number(inserted[0].id);
         await setState(userId, "admin_crypto_wallet_set_address", { walletId });
         await tg("sendMessage", { chat_id: chatId, text: `آدرس کیف پول ${currency} (${network}) را ارسال کنید.\nبرای پاک‌کردن: -` });
-        return;
+        return null;
     }
     if (data === "admin_crypto_wallet_add_other") {
         await setState(userId, "admin_crypto_wallet_add_other_currency");
         await tg("sendMessage", { chat_id: chatId, text: "نام ارز را ارسال کنید (مثال: BTC یا LTC):" });
-        return;
+        return null;
     }
     if (data.startsWith("admin_crypto_wallet_edit_")) {
         const walletId = Number(data.replace("admin_crypto_wallet_edit_", ""));
@@ -13040,7 +14000,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "کیف پول یافت نشد." });
-            return;
+            return null;
         }
         const w = rows[0];
         const rate = w.rate_mode === "auto" ? "خودکار" : w.rate_toman_per_unit ? `${formatPriceToman(Number(w.rate_toman_per_unit))} تومان` : "-";
@@ -13064,36 +14024,36 @@ async function handleCallback(update) {
                 ]
             }
         });
-        return;
+        return null;
     }
     if (data.startsWith("admin_crypto_wallet_set_address_")) {
         const walletId = Number(data.replace("admin_crypto_wallet_set_address_", ""));
         await setState(userId, "admin_crypto_wallet_set_address", { walletId });
         await tg("sendMessage", { chat_id: chatId, text: "آدرس کیف پول را ارسال کنید.\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data.startsWith("admin_crypto_wallet_set_rate_")) {
         const walletId = Number(data.replace("admin_crypto_wallet_set_rate_", ""));
         await setState(userId, "admin_crypto_wallet_set_rate", { walletId });
         await tg("sendMessage", { chat_id: chatId, text: "نرخ 1 واحد را به تومان ارسال کنید (فقط عدد).\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data.startsWith("admin_crypto_wallet_set_extra_")) {
         const walletId = Number(data.replace("admin_crypto_wallet_set_extra_", ""));
         await setState(userId, "admin_crypto_wallet_set_extra", { walletId });
         await tg("sendMessage", { chat_id: chatId, text: "حاشیه تومان (برای هر 1 واحد) را ارسال کنید (فقط عدد).\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data.startsWith("admin_crypto_wallet_toggle_auto_")) {
         const walletId = Number(data.replace("admin_crypto_wallet_toggle_auto_", ""));
         const rows = await sql `SELECT id, currency, rate_mode FROM crypto_wallets WHERE id = ${walletId} LIMIT 1;`;
         if (!rows.length)
-            return;
+            return null;
         const current = String(rows[0].rate_mode || "manual");
         const next = current === "auto" ? "manual" : "auto";
         await sql `UPDATE crypto_wallets SET rate_mode = ${next} WHERE id = ${walletId};`;
         await tg("sendMessage", { chat_id: chatId, text: `نرخ ${next === "auto" ? "خودکار" : "دستی"} تنظیم شد ✅` });
-        return;
+        return null;
     }
     if (data.startsWith("admin_crypto_wallet_toggle_")) {
         const walletId = Number(data.replace("admin_crypto_wallet_toggle_", ""));
@@ -13101,101 +14061,101 @@ async function handleCallback(update) {
         if (rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: `وضعیت به ${rows[0].active ? "فعال" : "غیرفعال"} تغییر کرد ✅` });
         }
-        return;
+        return null;
     }
     if (data.startsWith("admin_crypto_wallet_delete_")) {
         const walletId = Number(data.replace("admin_crypto_wallet_delete_", ""));
         await sql `DELETE FROM crypto_wallets WHERE id = ${walletId};`;
         await tg("sendMessage", { chat_id: chatId, text: "حذف شد ✅" });
-        return;
+        return null;
     }
     if (data === "admin_set_public_base_url") {
         await setState(userId, "admin_set_public_base_url");
         await tg("sendMessage", { chat_id: chatId, text: "آدرس کامل سایت را ارسال کنید. مثال: https://example.com\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data === "admin_set_tronado_api_key") {
         await setState(userId, "admin_set_tronado_api_key");
         await tg("sendMessage", { chat_id: chatId, text: "کلید Tronado را ارسال کنید.\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data === "admin_set_tetrapay_api_key") {
         await setState(userId, "admin_set_tetrapay_api_key");
         await tg("sendMessage", { chat_id: chatId, text: "کلید TetraPay را ارسال کنید.\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data === "admin_set_plisio_api_key") {
         await setState(userId, "admin_set_plisio_api_key");
         await tg("sendMessage", { chat_id: chatId, text: "کلید Plisio را ارسال کنید.\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data === "admin_set_swapwallet_api_key") {
         await setState(userId, "admin_set_swapwallet_api_key");
         await tg("sendMessage", { chat_id: chatId, text: "کلید SwapWallet را ارسال کنید.\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data === "admin_set_swapwallet_shop_username") {
         await setState(userId, "admin_set_swapwallet_shop_username");
         await tg("sendMessage", { chat_id: chatId, text: "username فروشگاه SwapWallet را ارسال کنید (بدون @).\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data === "admin_toggle_usdt_auto_rate") {
         const current = await getBoolSetting("usdt_auto_rate", true);
         await setSetting("usdt_auto_rate", (!current).toString());
         await tg("sendMessage", { chat_id: chatId, text: `نرخ خودکار USDT ${!current ? "فعال" : "غیرفعال"} شد ✅` });
-        return;
+        return null;
     }
     if (data === "admin_set_usdt_toman_rate") {
         await setState(userId, "admin_set_usdt_toman_rate");
         await tg("sendMessage", { chat_id: chatId, text: "نرخ 1 USDT را به تومان ارسال کنید. مثال: 460000\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data === "admin_toggle_plisio_auto_rate") {
         const current = await getBoolSetting("plisio_auto_rate", true);
         await setSetting("plisio_auto_rate", (!current).toString());
         await tg("sendMessage", { chat_id: chatId, text: `نرخ خودکار Plisio ${!current ? "فعال" : "غیرفعال"} شد ✅` });
-        return;
+        return null;
     }
     if (data === "admin_set_plisio_extra_toman") {
         await setState(userId, "admin_set_plisio_extra_toman");
         await tg("sendMessage", { chat_id: chatId, text: "حاشیه را به تومان (برای هر 1 USDT) ارسال کنید. مثال: 2000\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data === "admin_set_plisio_fallback_rate") {
         await setState(userId, "admin_set_plisio_fallback_rate");
         await tg("sendMessage", { chat_id: chatId, text: "نرخ دستی USDT را به تومان ارسال کنید (fallback). مثال: 65000\nبرای پاک‌کردن: -" });
-        return;
+        return null;
     }
     if (data === "admin_set_topup_price") {
         await setState(userId, "admin_set_topup_price");
         await tg("sendMessage", { chat_id: chatId, text: "قیمت هر 1GB افزایش دیتا را به تومان ارسال کنید. مثال: 500000" });
-        return;
+        return null;
     }
     if (data === "admin_set_product_price") {
         await setState(userId, "admin_set_product_price");
         await tg("sendMessage", { chat_id: chatId, text: "قیمت پیشفرض هر 1GB محصول را به تومان ارسال کنید. مثال: 500000" });
-        return;
+        return null;
     }
     if (data === "admin_set_custom_v2ray_extra_day") {
         await setState(userId, "admin_set_custom_v2ray_extra_day");
         await tg("sendMessage", { chat_id: chatId, text: "قیمت هر روز برای محصول سفارشی را به تومان ارسال کنید. مثال: 10000\nبرای خاموش: 0" });
-        return;
+        return null;
     }
     if (data === "admin_toggle_global_infinite") {
         const current = await getBoolSetting("global_infinite_mode", false);
         await setSetting("global_infinite_mode", (!current).toString());
         await tg("sendMessage", { chat_id: chatId, text: `حالت بینهایت سراسری ${!current ? "روشن" : "خاموش"} شد ✅` });
-        return;
+        return null;
     }
     if (data.startsWith("receipt_accept_")) {
         const orderId = Number(data.replace("receipt_accept_", ""));
         if (await isRateLimited(userId, "receipt_accept", 2000)) {
             await tg("sendMessage", { chat_id: chatId, text: "درخواست شما در حال پردازش است. لطفاً چند لحظه صبر کنید." });
-            return;
+            return null;
         }
         const result = await finalizeOrder(orderId, userId);
         await tg("sendMessage", { chat_id: chatId, text: result.ok ? "سفارش تایید شد ✅" : `خطا: ${result.reason}` });
-        return;
+        return null;
     }
     if (data.startsWith("receipt_deny_")) {
         const orderId = Number(data.replace("receipt_deny_", ""));
@@ -13216,17 +14176,17 @@ async function handleCallback(update) {
             await tg("sendMessage", { chat_id: Number(order.telegram_id), text: `رسید سفارش ${order.purchase_id} رد شد ❌` });
         }
         await tg("sendMessage", { chat_id: chatId, text: rows.length ? "رد شد ✅" : "سفارش یافت نشد یا قبلاً بررسی شده." });
-        return;
+        return null;
     }
     if (data.startsWith("crypto_accept_")) {
         const orderId = Number(data.replace("crypto_accept_", ""));
         if (await isRateLimited(userId, "crypto_accept", 2000)) {
             await tg("sendMessage", { chat_id: chatId, text: "درخواست شما در حال پردازش است. لطفاً چند لحظه صبر کنید." });
-            return;
+            return null;
         }
         const result = await finalizeOrder(orderId, userId);
         await tg("sendMessage", { chat_id: chatId, text: result.ok ? "سفارش تایید شد ✅" : `خطا: ${result.reason}` });
-        return;
+        return null;
     }
     if (data.startsWith("crypto_deny_")) {
         const orderId = Number(data.replace("crypto_deny_", ""));
@@ -13247,7 +14207,7 @@ async function handleCallback(update) {
             await tg("sendMessage", { chat_id: Number(order.telegram_id), text: `پرداخت کریپتو سفارش ${order.purchase_id} رد شد ❌` });
         }
         await tg("sendMessage", { chat_id: chatId, text: rows.length ? "رد شد ✅" : "سفارش یافت نشد یا قبلاً بررسی شده." });
-        return;
+        return null;
     }
     if (data.startsWith("receipt_ban_")) {
         const payload = data.replace("receipt_ban_", "");
@@ -13281,7 +14241,7 @@ async function handleCallback(update) {
             }
         }
         await tg("sendMessage", { chat_id: chatId, text: rows.length ? "کاربر بن شد ✅" : "سفارش یافت نشد یا قابل بن نیست." });
-        return;
+        return null;
     }
     if (data.startsWith("crypto_ban_")) {
         const payload = data.replace("crypto_ban_", "");
@@ -13310,17 +14270,17 @@ async function handleCallback(update) {
             await tg("sendMessage", { chat_id: targetUser, text: "به دلیل ارسال رسید نامعتبر، دسترسی شما مسدود شد." }).catch(() => { });
         }
         await tg("sendMessage", { chat_id: chatId, text: rows.length ? "کاربر بن شد ✅" : "سفارش یافت نشد یا قابل بن نیست." });
-        return;
+        return null;
     }
     if (data.startsWith("admin_provide_config_")) {
         const orderId = Number(data.replace("admin_provide_config_", ""));
         if (!Number.isFinite(orderId) || orderId <= 0) {
             await tg("sendMessage", { chat_id: chatId, text: "شناسه سفارش نامعتبر است." });
-            return;
+            return null;
         }
         await setState(userId, "admin_provide_config", { orderId });
         await tg("sendMessage", { chat_id: chatId, text: "کانفیگ آماده را ارسال کنید تا برای کاربر تحویل شود." });
-        return;
+        return null;
     }
     if (data.startsWith("topup_accept_")) {
         const id = Number(data.replace("topup_accept_", ""));
@@ -13332,7 +14292,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "این درخواست قابل تایید نیست یا قبلاً بررسی شده است." });
-            return;
+            return null;
         }
         await tg("sendMessage", {
             chat_id: Number(rows[0].telegram_id),
@@ -13341,14 +14301,14 @@ async function handleCallback(update) {
         const auto = await tryAutoApplyPanelTopup(id, userId);
         if (auto.ok) {
             await tg("sendMessage", { chat_id: chatId, text: `رسید تایید شد و افزایش دیتا خودکار اعمال شد ✅\n${auto.message}` });
-            return;
+            return null;
         }
         logInfo("topup_auto_apply_skipped", { topupRequestId: id, reason: auto.message });
         await notifyAdmins(`✅ رسید افزایش دیتا تایید شد: ${rows[0].purchase_id}`, {
             inline_keyboard: [[confirmButton(`done_topup_${id}`, "✅ انجام شد")]]
         });
         await tg("sendMessage", { chat_id: chatId, text: `رسید تایید شد ✅\nاعمال خودکار انجام نشد: ${auto.message}` });
-        return;
+        return null;
     }
     if (data.startsWith("topup_deny_")) {
         const id = Number(data.replace("topup_deny_", ""));
@@ -13360,11 +14320,11 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "این درخواست قابل رد نیست یا قبلاً بررسی شده است." });
-            return;
+            return null;
         }
-        await tg("sendMessage", { chat_id: Number(rows[0].telegram_id), text: `رسید سفارش ${rows[0].purchase_id} رد شد ❌` });
+        await tg("sendMessage", { chat_id: Number(rows[0].telegram_id), text: `رسید سفارش ${rows[0].purchase_id} رد شد ���` });
         await tg("sendMessage", { chat_id: chatId, text: "رد شد ✅" });
-        return;
+        return null;
     }
     if (data.startsWith("topup_ban_")) {
         const payload = data.replace("topup_ban_", "");
@@ -13388,7 +14348,7 @@ async function handleCallback(update) {
             logError("ban_user_notify_failed", error, { targetUserId: targetUser, by: userId, mode: "topup_receipt" });
         }
         await tg("sendMessage", { chat_id: chatId, text: "کاربر بن شد ✅" });
-        return;
+        return null;
     }
     if (data.startsWith("done_topup_")) {
         const id = Number(data.replace("done_topup_", ""));
@@ -13400,7 +14360,7 @@ async function handleCallback(update) {
     `;
         if (!rows.length) {
             await tg("sendMessage", { chat_id: chatId, text: "این درخواست قبلا بسته شده یا یافت نشد." });
-            return;
+            return null;
         }
         const cfg = await sql `SELECT config_value FROM inventory WHERE id = ${rows[0].inventory_id} LIMIT 1;`;
         await tg("sendMessage", {
@@ -13410,11 +14370,11 @@ async function handleCallback(update) {
                 `کانفیگ:\n${String(cfg[0]?.config_value || "-")}`
         });
         await tg("sendMessage", { chat_id: chatId, text: "درخواست به حالت Done رفت ✅" });
-        return;
+        return null;
     }
 }
 async function checkMandatoryChannels(userId, chatId, silent = false) {
-    if (isAdmin(userId))
+    if (await isAdmin(userId))
         return true;
     const channelsRaw = await getSetting("mandatory_channels");
     if (!channelsRaw)
@@ -13467,7 +14427,7 @@ async function checkMandatoryChannels(userId, chatId, silent = false) {
 }
 async function handleMessage(update) {
     if (!update?.from)
-        return;
+        return null;
     const text = (update.text ?? update.caption ?? "").trim();
     const startCommand = parseStartCommand(text);
     const photoFileId = update.photo?.length ? update.photo[update.photo.length - 1].file_id : null;
@@ -13481,46 +14441,46 @@ async function handleMessage(update) {
     }
     if (await isBanned(userId)) {
         await tg("sendMessage", { chat_id: chatId, text: "دسترسی شما به دلیل تخلف مسدود شده است." });
-        return;
+        return null;
     }
     if (!(await checkMandatoryChannels(userId, chatId))) {
-        return;
+        return null;
     }
     await maybeQualifyReferralUser(userId);
     if (startCommand) {
         await clearState(userId);
         await sendStartMedia(chatId);
         await sendMainMenu(chatId, userId);
-        return;
+        return null;
     }
-    if (text === "/admin" && isAdmin(userId)) {
+    if (text === "/admin" && await isAdmin(userId)) {
         await sendAdminPanel(chatId);
-        return;
+        return null;
     }
     if (text === "/help") {
-        if (isAdmin(userId)) {
+        if (await isAdmin(userId)) {
             await adminHelp(chatId);
         }
         else {
             const support = ((await getSetting("support_username")) || "").trim();
             await tg("sendMessage", { chat_id: chatId, text: support ? `Support: @${support.replace(/^@/, "")}` : "Support is not configured. Please contact the admin." });
         }
-        return;
+        return null;
     }
     const state = await getState(userId);
     if (text === "/cancel") {
         if (state) {
             await clearState(userId);
             await sendMainMenu(chatId, userId, "عملیات جاری لغو شد.");
-            return;
+            return null;
         }
         await sendMainMenu(chatId, userId, "هیچ عملیات فعالی برای لغو وجود ندارد.");
-        return;
+        return null;
     }
     if (state) {
         const consumed = await parseAndApplyState(chatId, userId, text, photoFileId, stickerFileId, animationFileId, state);
         if (consumed)
-            return;
+            return null;
     }
     await sendMainMenu(chatId, userId, "دستور نامعتبر بود. از منوی زیر استفاده کنید:");
 }
@@ -13535,7 +14495,7 @@ export async function handleTelegramUpdate(update) {
     `;
         if (!inserted.length) {
             logInfo("duplicate_update_ignored", { updateId: update.update_id });
-            return;
+            return null;
         }
         // Prune old updates asynchronously without awaiting
         sql `DELETE FROM processed_updates WHERE created_at < NOW() - INTERVAL '1 day'`.catch(() => { });
@@ -13544,7 +14504,7 @@ export async function handleTelegramUpdate(update) {
     }
     if (update.callback_query) {
         await handleCallback(update.callback_query);
-        return;
+        return null;
     }
     if (update.message) {
         await handleMessage(update.message);

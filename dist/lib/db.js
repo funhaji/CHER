@@ -1,45 +1,6 @@
 import { neon } from "@neondatabase/serverless";
-import postgres from "postgres";
-import { databaseDriver, databaseUrl } from "./env.js";
-function dbHostname(url) {
-    try {
-        const u = new URL(url.replace(/^postgres(ql)?:/i, "http:"));
-        return u.hostname.toLowerCase();
-    }
-    catch {
-        return "";
-    }
-}
-function useNeonServerless(url, driver) {
-    if (driver === "neon")
-        return true;
-    if (driver === "postgres")
-        return false;
-    const host = dbHostname(url);
-    return host.endsWith(".neon.tech") || host.includes(".neon.tech");
-}
-function postgresClientOptions(url) {
-    const host = dbHostname(url);
-    let port = "5432";
-    try {
-        const u = new URL(url.replace(/^postgres(ql)?:/i, "http:"));
-        if (u.port)
-            port = u.port;
-    }
-    catch {
-        // keep default
-    }
-    const transactionPooler = host.includes("pooler.supabase.com") || port === "6543";
-    return {
-        max: 1,
-        idle_timeout: 20,
-        connect_timeout: 30,
-        prepare: !transactionPooler
-    };
-}
-export const sql = (useNeonServerless(databaseUrl, databaseDriver)
-    ? neon(databaseUrl)
-    : postgres(databaseUrl, postgresClientOptions(databaseUrl)));
+import { databaseUrl } from "./env.js";
+export const sql = neon(databaseUrl);
 let schemaReady = null;
 export async function seedReferenceData() {
     await sql `
@@ -386,11 +347,20 @@ export function ensureSchema() {
             await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'tronado';`;
             await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS receipt_file_id TEXT;`;
             await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS admin_decision_by BIGINT;`;
+            await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS config_name TEXT;`;
+            await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INT NOT NULL DEFAULT 1;`;
+            await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS retry_parent_order_id BIGINT REFERENCES orders(id);`;
+            await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0;`;
+            await sql `ALTER TABLE orders ADD COLUMN IF NOT EXISTS config_error_message TEXT;`;
             await sql `ALTER TABLE panels ADD COLUMN IF NOT EXISTS allow_new_sales BOOLEAN NOT NULL DEFAULT FALSE;`;
             await sql `ALTER TABLE panels ADD COLUMN IF NOT EXISTS last_check_at TIMESTAMPTZ;`;
             await sql `ALTER TABLE panels ADD COLUMN IF NOT EXISTS last_check_ok BOOLEAN;`;
             await sql `ALTER TABLE panels ADD COLUMN IF NOT EXISTS last_check_message TEXT;`;
             await sql `ALTER TABLE panels ADD COLUMN IF NOT EXISTS cached_meta JSONB NOT NULL DEFAULT '{}'::jsonb;`;
+            await sql `ALTER TABLE panels ADD COLUMN IF NOT EXISTS subscription_public_port INT;`;
+            await sql `ALTER TABLE panels ADD COLUMN IF NOT EXISTS subscription_public_host TEXT;`;
+            await sql `ALTER TABLE panels ADD COLUMN IF NOT EXISTS subscription_link_protocol TEXT;`;
+            await sql `ALTER TABLE panels ADD COLUMN IF NOT EXISTS config_public_host TEXT;`;
             await sql `CREATE INDEX IF NOT EXISTS inventory_owner_status_idx ON inventory(owner_telegram_id, status);`;
             await sql `CREATE INDEX IF NOT EXISTS inventory_product_status_idx ON inventory(product_id, status);`;
             await sql `CREATE INDEX IF NOT EXISTS inventory_panel_user_key_idx ON inventory(panel_id, panel_user_key);`;

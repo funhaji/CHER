@@ -12,6 +12,18 @@ export async function setSetting(key, value) {
     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
   `;
 }
+export async function getAdminIds() {
+    const envIds = String(process.env.ADMIN_IDS || "")
+        .split(",")
+        .map((x) => Number(x.trim()))
+        .filter((x) => Number.isFinite(x));
+    const adminSetting = (await getSetting("admin_ids")) || "";
+    const settingIds = String(adminSetting)
+        .split(/[,\s]+/)
+        .map((x) => Number(x.trim()))
+        .filter((x) => Number.isFinite(x));
+    return Array.from(new Set([...envIds, ...settingIds]));
+}
 export async function getBoolSetting(key, fallback = false) {
     const value = await getSetting(key);
     if (value === null)
