@@ -1,9 +1,42 @@
 import { ensureSchema, sql } from "./db.js";
+const CACHE_TTL_MS = 30_000; 
 
-export async function getSetting(key: string) {
+let cacheData: Map<string, string | null> | null = null;
+let cacheFetchedAt = 0;
+let cacheLoadPromise: Promise<Map<string, string | null>> | null = null;
+
+async function loadAllSettings(): Promise<Map<string, string | null>> {
   await ensureSchema();
-  const rows = await sql`SELECT value FROM settings WHERE key = ${key} LIMIT 1;`;
-  return rows.length ? String(rows[0].value) : null;
+  const rows = await sql`SELECT key, value FROM settings;`;
+  const map = new Map<string, string | null>();
+  for (const row of rows) {
+    map.set(String(row.key), row.value != null ? String(row.value) : null);
+  }
+  cacheData = map;
+  cacheFetchedAt = Date.now();
+  cacheLoadPromise = null;
+  return map;
+}
+
+async function getCache(): Promise<Map<string, string | null>> {
+  if (cacheData && Date.now() - cacheFetchedAt < CACHE_TTL_MS) {
+    return cacheData;
+  }
+  if (!cacheLoadPromise) {
+    cacheLoadPromise = loadAllSettings();
+  }
+  return cacheLoadPromise;
+}
+
+export function invalidateSettingsCache() {
+  cacheData = null;
+  cacheFetchedAt = 0;
+  cacheLoadPromise = null;
+}
+
+export async function getSetting(key: string): Promise<string | null> {
+  const cache = await getCache();
+  return cache.has(key) ? (cache.get(key) ?? null) : null;
 }
 
 export async function setSetting(key: string, value: string) {
@@ -13,6 +46,10 @@ export async function setSetting(key: string, value: string) {
     VALUES (${key}, ${value})
     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
   `;
+  // Write-through: keep cache consistent without waiting for TTL expiry
+  if (cacheData) {
+    cacheData.set(key, value);
+  }
 }
 
 export async function getAdminIds() {
@@ -50,4 +87,3 @@ export async function getPublicBaseUrl(fallbackEnv?: string) {
   if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
   return "";
 }
-
