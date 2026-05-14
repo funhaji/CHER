@@ -8817,6 +8817,24 @@ function buildAdminDeliverySummary(params: {
   const uuid = typeof meta.uuid === "string" ? meta.uuid : null;
   const days = typeof meta.expire_days === "number" ? meta.expire_days : null;
 
+  // Collect all subscription URLs (single or bulk)
+  const allSubUrls: string[] = [];
+  if (Array.isArray(meta.allSubscriptionUrls)) {
+    for (const u of meta.allSubscriptionUrls) {
+      if (typeof u === "string" && u.trim()) allSubUrls.push(u.trim());
+    }
+  }
+  if (!allSubUrls.length && params.deliveryPayload.subscriptionUrl) {
+    allSubUrls.push(params.deliveryPayload.subscriptionUrl);
+  }
+
+  const subUrlLines =
+    allSubUrls.length > 1
+      ? allSubUrls.map((u, i) => `لینک ساب ${i + 1}:\n${u}`).join("\n\n")
+      : allSubUrls.length === 1
+        ? `لینک ساب:\n${allSubUrls[0]}`
+        : null;
+
   const lines = [
     "✅ سفارش تحویل شد",
     `شناسه خرید: ${params.purchaseId}`,
@@ -8825,7 +8843,7 @@ function buildAdminDeliverySummary(params: {
     `نام: ${params.telegramFullName}`,
     `محصول: ${params.productName}`,
     params.walletUsed ? `کسر از کیف پول: ${formatPriceToman(params.walletUsed)} تومان` : null,
-    params.deliveryPayload.subscriptionUrl ? `لینک ساب:\n${params.deliveryPayload.subscriptionUrl}` : null,
+    subUrlLines,
     username ? `username: ${username}` : null,
     email ? `email: ${email}` : null,
     uuid ? `uuid: ${uuid}` : null,
@@ -11026,23 +11044,61 @@ async function finalizeOrder(orderId: number, decidedBy: number | null) {
       text: `پرداخت شما تایید شد ✅${bulkQuantity > 1 ? `\n${bulkQuantity} کانفیگ ساخته شد.` : ""}`
     }).catch(() => {});
     
-    // Create combined delivery payload for bulk
-    const combinedDelivery: DeliveryPayload = {
+    // Deliver each config separately when every provision has its own subscription URL
+    // (Sanaei / Marzban bulk: each user gets a distinct sub link)
+    if (allSubscriptionUrls.length > 1) {
+      for (let i = 0; i < allProvisions.length; i++) {
+        const prov = allProvisions[i];
+        const isLast = i === allProvisions.length - 1;
+        const provLinks = prov.deliveryPayload.configLinks || [];
+        const provSub = prov.deliveryPayload.subscriptionUrl || null;
+        const singleDelivery: DeliveryPayload = {
+          configLinks: provLinks,
+          subscriptionUrl: provSub,
+          primaryQr: buildQrText(provLinks[0] || null, provLinks, provSub),
+          primaryText: provLinks[0] || provSub || "",
+          metadata: prov.deliveryPayload.metadata
+        };
+        await sendDeliveryPackage(
+          Number(order.telegram_id),
+          String(order.purchase_id),
+          String(provLinks[0] || provSub || ""),
+          singleDelivery,
+          isLast
+            ? [[{ text: "➕ درخواست افزایش دیتا", callback_data: "topup_menu" }], [homeButton()]]
+            : []
+        ).catch((e) => logError("delivery_package_failed", e, { orderId: order.id, configIndex: i }));
+      }
+    } else {
+      // Single sub URL or no subs: send one combined message
+      const combinedDelivery: DeliveryPayload = {
+        configLinks: allConfigLinks,
+        subscriptionUrl: allSubscriptionUrls[0] || null,
+        primaryQr: buildQrText(allConfigLinks[0] || null, allConfigLinks, allSubscriptionUrls[0] || null),
+        primaryText: allConfigLinks[0] || allSubscriptionUrls[0] || "",
+        metadata: {
+          bulkCount: bulkQuantity
+        }
+      };
+      await sendDeliveryPackage(
+        Number(order.telegram_id),
+        String(order.purchase_id),
+        String(allConfigLinks[0] || allSubscriptionUrls[0] || ""),
+        combinedDelivery,
+        [[{ text: "➕ درخواست افزایش دیتا", callback_data: "topup_menu" }], [homeButton()]]
+      ).catch((e) => logError("delivery_package_failed", e, { orderId: order.id }));
+    }
+
+    // Admin notification — build a combined summary with ALL sub URLs
+    const adminDelivery: DeliveryPayload = {
       configLinks: allConfigLinks,
       subscriptionUrl: allSubscriptionUrls[0] || null,
-      primaryQr: buildQrText(allConfigLinks[0] || null, allConfigLinks, allSubscriptionUrls[0] || null),
       primaryText: allConfigLinks[0] || allSubscriptionUrls[0] || "",
       metadata: {
         bulkCount: bulkQuantity,
         allSubscriptionUrls: allSubscriptionUrls.length > 1 ? allSubscriptionUrls : undefined
       }
     };
-    
-    await sendDeliveryPackage(Number(order.telegram_id), String(order.purchase_id), String(allConfigLinks[0] || allSubscriptionUrls[0] || ""), combinedDelivery, [
-      [{ text: "➕ درخواست افزایش دیتا", callback_data: "topup_menu" }],
-      [homeButton()]
-    ]).catch((e) => logError("delivery_package_failed", e, { orderId: order.id }));
-    
     await notifyAdmins(
       buildAdminDeliverySummary({
         purchaseId: String(order.purchase_id),
@@ -11050,7 +11106,7 @@ async function finalizeOrder(orderId: number, decidedBy: number | null) {
         telegramUsername: profile.username,
         telegramFullName: profile.fullName,
         productName: String(order.product_name || "-") + (bulkQuantity > 1 ? ` (x${bulkQuantity})` : ""),
-        deliveryPayload: combinedDelivery,
+        deliveryPayload: adminDelivery,
         walletUsed: Number(order.wallet_used || 0)
       }),
       { inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${String(order.purchase_id)}` }]] }
@@ -11926,6 +11982,7 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     const parts = payload.split("_");
     const purchaseId = parts[0];
     const page = Math.max(1, Math.round(Number(parts[1] || 1)));
+    // Fetch ALL inventory items for this purchase so bulk orders show every config + sub URL
     const rows = await sql`
       SELECT i.id, i.delivery_payload, p.name
       FROM inventory i
@@ -11934,29 +11991,56 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
       WHERE i.owner_telegram_id = ${userId}
         AND i.status = 'sold'
         AND o.purchase_id = ${purchaseId}
-      LIMIT 1;
+      ORDER BY i.id ASC;
     `;
     if (!rows.length) {
       await tg("sendMessage", { chat_id: chatId, text: "این سفارش برای شما نیست یا یافت نشد." });
       return null;
     }
-    const inv = rows[0];
-    const payloadObj = parseDeliveryPayload(inv.delivery_payload);
-    const links = payloadObj.configLinks || [];
-    if (links.length <= 1) {
+    const productName = String(rows[0].name || "-");
+
+    // Build a flat list of entries: each entry may have a sub URL and/or config link(s)
+    type ConfigEntry = { subUrl: string | null; configLink: string | null };
+    const entries: ConfigEntry[] = [];
+    for (const inv of rows) {
+      const pd = parseDeliveryPayload(inv.delivery_payload);
+      const subUrl = pd.subscriptionUrl || null;
+      const links = pd.configLinks || [];
+      if (links.length > 0) {
+        // Each config link becomes its own entry (paired with the sub URL if any)
+        for (const link of links) {
+          entries.push({ subUrl, configLink: link });
+        }
+      } else if (subUrl) {
+        entries.push({ subUrl, configLink: null });
+      }
+    }
+
+    if (entries.length <= 1) {
       await tg("sendMessage", { chat_id: chatId, text: "برای این سفارش کانفیگ اضافی وجود ندارد." });
       return null;
     }
-    const pageSize = 5;
-    const totalPages = Math.max(1, Math.ceil(links.length / pageSize));
+
+    const pageSize = 3;
+    const totalPages = Math.max(1, Math.ceil(entries.length / pageSize));
     const safePage = Math.min(totalPages, Math.max(1, page));
     const start = (safePage - 1) * pageSize;
-    const slice = links.slice(start, start + pageSize);
+    const slice = entries.slice(start, start + pageSize);
+
+    const entryLines = slice.map((entry, idx) => {
+      const num = start + idx + 1;
+      const parts: string[] = [`${num})`];
+      if (entry.subUrl) parts.push(`لینک ساب:\n${entry.subUrl}`);
+      if (entry.configLink) parts.push(`کانفیگ:\n${entry.configLink}`);
+      return parts.join("\n");
+    });
+
     const text =
-      `محصول: ${String(inv.name || "-")}\n` +
+      `محصول: ${productName}\n` +
       `شناسه خرید: ${purchaseId}\n` +
       `کانفیگ‌ها (صفحه ${safePage}/${totalPages}):\n\n` +
-      slice.map((item, idx) => `${start + idx + 1}) ${item}`).join("\n");
+      entryLines.join("\n\n");
+
     const navRow: Array<{ text: string; callback_data: string }> = [];
     if (safePage > 1) navRow.push({ text: "⬅️ قبلی", callback_data: `show_configs_${purchaseId}_${safePage - 1}` });
     if (safePage < totalPages) navRow.push({ text: "بعدی ➡️", callback_data: `show_configs_${purchaseId}_${safePage + 1}` });
