@@ -5265,8 +5265,9 @@ async function parseAndApplyState(
     const quantity = Math.max(1, Math.round(Number(checkout.quantity || 1)));
     // For quantity > 1, generate multiple unique names based on base name
     let configNames: string[] = [];
+    const sharedRandom = Math.floor(Math.random() * 100) + 1;
     for (let i = 1; i <= quantity; i++) {
-      configNames.push(await generateUniqueConfigName(configName, userId, quantity, i));
+      configNames.push(await generateUniqueConfigName(configName, userId, quantity, i, sharedRandom));
     }
     const checkoutWithName = { ...checkout, configName: configNames[0], configNames };
     await clearState(userId);
@@ -9441,26 +9442,30 @@ async function tryAutoApplyPanelTopup(topupRequestId: number, doneBy: number) {
   return { ok: true, message: result.message };
 }
 
-async function generateUniqueConfigName(baseName: string, userId: number, quantity: number, index: number) {
-  // For single item, use base name directly (or with random if duplicate)
-  // For bulk: config1_1, config1_2, etc.
-  let name = quantity === 1 ? baseName : `${baseName}_${index}`;
-  
+async function generateUniqueConfigName(baseName: string, userId: number, quantity: number, index: number, sharedRandom?: number) {
+  // Always append a random number (1-100) to the base name
+  // e.g. "taha" -> "taha81"; bulk: "taha81_1", "taha81_2", ...
+  const randomNum = sharedRandom ?? (Math.floor(Math.random() * 100) + 1);
+  const nameWithRandom = `${baseName}${randomNum}`;
+
+  let name = quantity === 1 ? nameWithRandom : `${nameWithRandom}_${index}`;
+
   // Check if this exact name exists for this user
   const existing = await sql`
   SELECT id FROM orders
   WHERE telegram_id = ${userId} AND config_name = ${name}
   LIMIT 1;
   `;
-  
+
   if (existing.length > 0) {
-  // Name exists, add random number to make it unique
-  const randomNum = Math.floor(Math.random() * 10000);
-  name = `${baseName}_${randomNum}`;
+    // Collision — pick a different random and retry once
+    const retryRandom = Math.floor(Math.random() * 100) + 1;
+    const retryBase = `${baseName}${retryRandom}`;
+    name = quantity === 1 ? retryBase : `${retryBase}_${index}`;
   }
-  
+
   return name;
-  }
+}
 
 async function createBulkOrders(
   chatId: number,
@@ -9474,8 +9479,9 @@ async function createBulkOrders(
 ) {
   // Generate unique config names for the bulk order
   const configNames: string[] = [];
+  const sharedRandom = Math.floor(Math.random() * 100) + 1;
   for (let i = 1; i <= quantity; i++) {
-    const configName = await generateUniqueConfigName(baseName, userId, quantity, i);
+    const configName = await generateUniqueConfigName(baseName, userId, quantity, i, sharedRandom);
     configNames.push(configName);
   }
   
@@ -10874,6 +10880,7 @@ async function finalizeOrder(orderId: number, decidedBy: number | null) {
       o.panel_delivery_mode,
       o.panel_config_snapshot,
       o.wallet_used,
+      o.final_price,
       o.payment_method,
       o.config_name,
       COALESCE(o.product_name_snapshot, p.name) AS product_name,
@@ -10922,7 +10929,7 @@ async function finalizeOrder(orderId: number, decidedBy: number | null) {
         allProvisions.push(provision);
       } catch (err: any) {
         logError("provision_failed", err, { orderId, configIndex: i });
-        
+
         // If any provision fails, mark order as awaiting_config
         await sql`
           UPDATE orders
@@ -10930,17 +10937,41 @@ async function finalizeOrder(orderId: number, decidedBy: number | null) {
           WHERE id = ${order.id} AND status = 'fulfilling';
         `;
 
+        // Refund the full order amount back to the user's wallet
+        const refundAmount = Math.max(0, Math.round(Number(order.final_price || 0)));
+        if (refundAmount > 0) {
+          try {
+            await refundWalletUsage(
+              Number(order.telegram_id),
+              refundAmount,
+              `بازگشت وجه خودکار به دلیل خطای ساخت کانفیگ (سفارش ${order.purchase_id})`
+            );
+          } catch (refundErr) {
+            logError("provision_failed_refund_error", refundErr, { orderId, telegramId: order.telegram_id, refundAmount });
+          }
+        }
+
         await tg("sendMessage", {
           chat_id: Number(order.telegram_id),
-          text: `پرداخت شما تایید شد ✅\nمتاسفانه ارتباط با سرور برای ساخت اتوماتیک کانفیگ شما (سفارش ${order.purchase_id}) با خطا مواجه شد.\n${allProvisions.length > 0 ? `${allProvisions.length} کانفیگ ساخته شد.` : ""}\nادمین به زودی کانفیگ(های) شما را به صورت دستی تحویل خواهد داد.`
+          text:
+            `پرداخت شما تایید شد ✅\n` +
+            `متاسفانه ارتباط با سرور برای ساخت اتوماتیک کانفیگ شما (سفارش ${order.purchase_id}) با خطا مواجه شد.\n` +
+            `${allProvisions.length > 0 ? `${allProvisions.length} کانفیگ ساخته شد.\n` : ""}` +
+            `${refundAmount > 0 ? `💰 مبلغ ${formatPriceToman(refundAmount)} تومان به کیف پول شما برگشت داده شد.\n` : ""}` +
+            `ادمین به زودی کانفیگ(های) شما را به صورت دستی تحویل خواهد داد.`
         }).catch(() => {});
-        
-        await notifyAdmins(`❌ خطای ساخت کانفیگ روی پنل برای سفارش ${order.purchase_id}:\n${err.message || "Unknown error"}\nتعداد کل: ${bulkQuantity}\nساخته شده: ${allProvisions.length}\nسفارش در وضعیت «نیازمند کانفیگ دستی» قرار گرفت.`, {
-          inline_keyboard: [
-            [{ text: "ارسال کانفیگ دستی", callback_data: `admin_provide_config_${order.id}` }],
-            [{ text: "🔎 بررسی سفارش", callback_data: `admin_open_purchase_${String(order.purchase_id)}` }]
-          ]
-        });
+
+        await notifyAdmins(
+          `❌ خطای ساخت کانفیگ روی پنل برای سفارش ${order.purchase_id}:\n${err.message || "Unknown error"}\nتعداد کل: ${bulkQuantity}\nساخته شده: ${allProvisions.length}\n` +
+          `${refundAmount > 0 ? `💰 مبلغ ${formatPriceToman(refundAmount)} تومان به کیف پول کاربر برگشت داده شد.\n` : ""}` +
+          `سفارش در وضعیت «نیازمند کانفیگ دستی» قرار گرفت.`,
+          {
+            inline_keyboard: [
+              [{ text: "ارسال کانفیگ دستی", callback_data: `admin_provide_config_${order.id}` }],
+              [{ text: "🔎 بررسی سفارش", callback_data: `admin_open_purchase_${String(order.purchase_id)}` }]
+            ]
+          }
+        );
         return { ok: false, reason: "provision_failed" };
       }
     }
