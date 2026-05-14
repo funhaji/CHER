@@ -4969,6 +4969,7 @@ async function startCustomV2rayWizard(chatId: number, userId: number, productId:
     days: baseDays,
     pricePerGb,
     dayPrice,
+    quantity: 1,
     messageId: 0
   };
   await setState(userId, "custom_v2ray_wizard", statePayload);
@@ -4986,8 +4987,10 @@ async function renderCustomV2rayWizard(chatId: number, userId: number, messageId
   const days = Math.max(30, Math.round(Number(p.days || baseDays)));
   const pricePerGb = Math.max(1, Math.round(Number(p.pricePerGb || 500000)));
   const dayPrice = Math.max(0, Math.round(Number(p.dayPrice || 0)));
+  const quantity = Math.max(1, Math.round(Number(p.quantity || 1)));
   const gb = Math.max(1, Math.round(dataMb / 1024));
-  const totalPrice = Math.max(1, gb * pricePerGb + days * dayPrice);
+  const unitPrice = Math.max(1, gb * pricePerGb + days * dayPrice);
+  const totalPrice = unitPrice * quantity;
 
   const rows = await sql`SELECT name FROM products WHERE id = ${productId} LIMIT 1;`;
   const productName = rows.length ? String(rows[0].name || "-") : "-";
@@ -4996,8 +4999,9 @@ async function renderCustomV2rayWizard(chatId: number, userId: number, messageId
     `🎁 فاکتور خرید [${days} روز، ${gb} گیگابایت]\n\n` +
     `🔸 محصول: ${productName}\n` +
     `🔸 حجم: ${gb} گیگابایت\n` +
-    `🔸 زمان: ${days} روز\n\n` +
-    `💰 مبلغ: ${formatPriceToman(totalPrice)} تومان\n\n` +
+    `🔸 زمان: ${days} روز\n` +
+    `🔸 تعداد کانفیگ: ${quantity} عدد\n\n` +
+    `💰 مبلغ: ${formatPriceToman(totalPrice)} تومان${quantity > 1 ? ` (${quantity} × ${formatPriceToman(unitPrice)})` : ""}\n\n` +
     `📌 قیمت‌ها:\n` +
     `- هر 1GB: ${formatPriceToman(pricePerGb)} تومان\n` +
     `- هر روز: ${formatPriceToman(dayPrice)} تومان\n\n` +
@@ -5014,6 +5018,11 @@ async function renderCustomV2rayWizard(chatId: number, userId: number, messageId
     cb(`${days} روز`, "noop_custom_days"),
     cb("افزایش +", "custom_v2ray_inc_days", "primary")
   ]);
+  keyboard.push([
+    cb("کاهش -", "custom_v2ray_dec_count", "primary"),
+    cb(`${quantity} عدد`, "noop_custom_count"),
+    cb("افزایش +", "custom_v2ray_inc_count", "primary")
+  ]);
   keyboard.push([confirmButton(`custom_v2ray_confirm`, "✅ تایید و پرداخت")]);
   keyboard.push([backButton("buy_menu")]);
 
@@ -5025,7 +5034,7 @@ async function renderCustomV2rayWizard(chatId: number, userId: number, messageId
     return null;
   }
   const msg: any = await tg("sendMessage", { chat_id: chatId, text, reply_markup: { inline_keyboard: keyboard } });
-  await setState(userId, "custom_v2ray_wizard", { ...p, messageId: Number(msg?.message_id || 0), dataMb, days });
+  await setState(userId, "custom_v2ray_wizard", { ...p, messageId: Number(msg?.message_id || 0), dataMb, days, quantity });
 }
 
 async function computeCustomV2rayCheckout(userId: number) {
@@ -5038,14 +5047,17 @@ async function computeCustomV2rayCheckout(userId: number) {
   const days = Math.max(30, Math.round(Number(p.days || baseDays)));
   const pricePerGb = Math.max(1, Math.round(Number(p.pricePerGb || 500000)));
   const dayPrice = Math.max(0, Math.round(Number(p.dayPrice || 0)));
+  const quantity = Math.max(1, Math.round(Number(p.quantity || 1)));
   const gb = Math.max(1, Math.round(dataMb / 1024));
-  const totalPrice = Math.max(1, gb * pricePerGb + days * dayPrice);
+  const unitPrice = Math.max(1, gb * pricePerGb + days * dayPrice);
+  const totalPrice = unitPrice * quantity;
   return {
     productId: Number(p.productId),
     baseMb,
     baseDays,
     dataMb,
     days,
+    quantity,
     totalPrice
   };
 }
@@ -5250,8 +5262,13 @@ async function parseAndApplyState(
       await tg("sendMessage", { chat_id: chatId, text: "جلسه سفارش سفارشی منقضی شده. دوباره از اول شروع کن." });
       return true;
     }
-    // Store config name in checkout and proceed to wallet prompt
-    const checkoutWithName = { ...checkout, configName };
+    const quantity = Math.max(1, Math.round(Number(checkout.quantity || 1)));
+    // For quantity > 1, generate multiple unique names based on base name
+    let configNames: string[] = [];
+    for (let i = 1; i <= quantity; i++) {
+      configNames.push(await generateUniqueConfigName(configName, userId, quantity, i));
+    }
+    const checkoutWithName = { ...checkout, configName: configNames[0], configNames };
     await clearState(userId);
     await setState(userId, "custom_v2ray_checkout", checkoutWithName);
     await showCustomWalletUsagePrompt(chatId, userId, checkout.totalPrice);
@@ -5511,12 +5528,14 @@ async function parseAndApplyState(
   const totalPrice = Math.max(1, Math.round(Number(checkout.totalPrice || 0)));
   const dataMb = Math.max(1, Math.round(Number(checkout.dataMb || 0)));
   const days = Math.max(30, Math.round(Number(checkout.days || 30)));
+  const quantity = Math.max(1, Math.round(Number(checkout.quantity || 1)));
   const gb = Math.max(1, Math.round(dataMb / 1024));
   const configName = String(checkout.configName || "").trim() || undefined;
+  const configNames: string[] = Array.isArray(checkout.configNames) ? checkout.configNames : (configName ? [configName] : []);
   const overrides = {
   basePriceToman: totalPrice,
-  panelConfigPatch: { data_limit_mb: dataMb, expire_days: days, force_awaiting_config: true },
-  productNameSuffix: `(سفارشی ${gb}GB / ${days} روز)`,
+  panelConfigPatch: { data_limit_mb: dataMb, expire_days: days, force_awaiting_config: true, ...(quantity > 1 ? { bulk_quantity: quantity, bulk_config_names: configNames } : {}) },
+  productNameSuffix: `(سفارشی ${gb}GB / ${days} روز${quantity > 1 ? ` × ${quantity}` : ""})`,
   configName
   };
   await clearState(userId);
@@ -10856,6 +10875,7 @@ async function finalizeOrder(orderId: number, decidedBy: number | null) {
       o.panel_config_snapshot,
       o.wallet_used,
       o.payment_method,
+      o.config_name,
       COALESCE(o.product_name_snapshot, p.name) AS product_name,
       p.size_mb,
       p.is_infinite
@@ -11007,20 +11027,32 @@ async function finalizeOrder(orderId: number, decidedBy: number | null) {
     return { ok: true, reason: "fulfilled" };
   }
   const globalInfinite = await getBoolSetting("global_infinite_mode", false);
-  const allocated = await sql`
-    UPDATE inventory
-    SET status = 'sold', owner_telegram_id = ${order.telegram_id}, sold_order_id = ${order.id}, sold_at = NOW()
-    WHERE id = (
-      SELECT id FROM inventory
-      WHERE product_id = ${order.product_id} AND status = 'available'
-      ORDER BY id ASC
-      LIMIT 1
-      FOR UPDATE SKIP LOCKED
-    )
-    RETURNING id, config_value;
-  `;
-  if (!allocated.length) {
-    const panelConfig = sanitizePanelConfig(order.panel_config_snapshot);
+  const panelConfig = sanitizePanelConfig(order.panel_config_snapshot);
+  const bulkQty = Math.max(1, Math.round(Number(panelConfig.bulk_quantity || 1)));
+
+  // Allocate N inventory items for bulk orders
+  const allocatedItems: Array<{ id: number; config_value: string }> = [];
+  for (let i = 0; i < bulkQty; i++) {
+    const allocated = await sql`
+      UPDATE inventory
+      SET status = 'sold', owner_telegram_id = ${order.telegram_id}, sold_order_id = ${order.id}, sold_at = NOW()
+      WHERE id = (
+        SELECT id FROM inventory
+        WHERE product_id = ${order.product_id} AND status = 'available'
+        ORDER BY id ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING id, config_value;
+    `;
+    if (allocated.length) {
+      allocatedItems.push({ id: Number(allocated[0].id), config_value: String(allocated[0].config_value) });
+    } else {
+      break;
+    }
+  }
+
+  if (!allocatedItems.length) {
     const forceAwaitingConfig = panelConfig.force_awaiting_config === true;
     const forceRequireInventory = panelConfig.force_require_inventory === true;
     if (!forceRequireInventory && (globalInfinite || order.is_infinite || forceAwaitingConfig)) {
@@ -11036,6 +11068,10 @@ async function finalizeOrder(orderId: number, decidedBy: number | null) {
       const extraLines: string[] = [];
       if (typeof panelConfig.data_limit_mb === "number") extraLines.push(`حجم: ${Math.max(1, Math.round(Number(panelConfig.data_limit_mb) / 1024))} گیگابایت`);
       if (typeof panelConfig.expire_days === "number") extraLines.push(`زمان: ${Math.max(1, Math.round(Number(panelConfig.expire_days)))} روز`);
+      const bulkQtyNotif = Math.max(1, Math.round(Number(panelConfig.bulk_quantity || 1)));
+      if (bulkQtyNotif > 1) extraLines.push(`تعداد کانفیگ: ${bulkQtyNotif} عدد`);
+      const bulkNamesNotif: string[] = Array.isArray(panelConfig.bulk_config_names) ? panelConfig.bulk_config_names : [];
+      if (bulkNamesNotif.length > 0) extraLines.push(`نام‌ها: ${bulkNamesNotif.join(", ")}`);
       await notifyAdmins(`🛠 سفارش ${order.purchase_id} نیاز به ساخت کانفیگ دستی دارد.${extraLines.length ? `\n${extraLines.join("\n")}` : ""}`, {
         inline_keyboard: [[{ text: "ارسال کانفیگ", callback_data: `admin_provide_config_${order.id}` }]]
       });
@@ -11045,27 +11081,42 @@ async function finalizeOrder(orderId: number, decidedBy: number | null) {
     await notifyAdmins(`⚠️ سفارش ${order.purchase_id} پرداخت شد اما موجودی این محصول تمام شده است.`);
     return { ok: false, reason: "stock_empty" };
   }
+
+  // Warn admin if fewer items were allocated than requested
+  if (allocatedItems.length < bulkQty) {
+    await notifyAdmins(`⚠️ سفارش ${order.purchase_id}: درخواست ${bulkQty} آیتم بود اما فقط ${allocatedItems.length} موجود بود.`);
+  }
+
   await sql`
     UPDATE orders
-    SET status = 'paid', paid_at = NOW(), inventory_id = ${allocated[0].id}, admin_decision_by = ${decidedBy}
+    SET status = 'paid', paid_at = NOW(), inventory_id = ${allocatedItems[0].id}, admin_decision_by = ${decidedBy}
     WHERE id = ${order.id};
   `;
-  await recordInventoryForensicEvent(Number(allocated[0].id), "sale_delivered", {
-    purchaseId: String(order.purchase_id),
-    by: decidedBy
-  });
+  for (const item of allocatedItems) {
+    await recordInventoryForensicEvent(item.id, "sale_delivered", {
+      purchaseId: String(order.purchase_id),
+      by: decidedBy
+    });
+  }
   await tg("sendMessage", {
     chat_id: Number(order.telegram_id),
-    text: "پرداخت شما تایید شد ✅"
+    text: `پرداخت شما تایید شد ✅${allocatedItems.length > 1 ? `\n${allocatedItems.length} کانفیگ آماده شد.` : ""}`
   }).catch(() => {});
+
+  const allConfigLinks = allocatedItems.map((item) => item.config_value);
+  const inventoryDelivery: DeliveryPayload = {
+    configLinks: allConfigLinks,
+    primaryText: allConfigLinks[0] || ""
+  };
+
   await sendDeliveryPackage(
     Number(order.telegram_id),
     String(order.purchase_id),
-    String(allocated[0].config_value),
-    { configLinks: [String(allocated[0].config_value)] },
+    allConfigLinks[0] || "",
+    inventoryDelivery,
     [
-    [{ text: "➕ ��رخواست افزایش دیتا", callback_data: "topup_menu" }],
-    [homeButton()]
+      [{ text: "➕ درخواست افزایش دیتا", callback_data: "topup_menu" }],
+      [homeButton()]
     ]
   ).catch((e) => logError("delivery_package_failed", e, { orderId: order.id }));
   await notifyAdmins(
@@ -11074,8 +11125,8 @@ async function finalizeOrder(orderId: number, decidedBy: number | null) {
       userId: Number(order.telegram_id),
       telegramUsername: profile.username,
       telegramFullName: profile.fullName,
-      productName: String(order.product_name || "-"),
-      deliveryPayload: { configLinks: [String(allocated[0].config_value)] },
+      productName: String(order.product_name || "-") + (allocatedItems.length > 1 ? ` (x${allocatedItems.length})` : ""),
+      deliveryPayload: inventoryDelivery,
       walletUsed: Number(order.wallet_used || 0)
     }),
     { inline_keyboard: [[{ text: "🔎 باز کردن سفارش", callback_data: `admin_open_purchase_${String(order.purchase_id)}` }]] }
@@ -11429,6 +11480,21 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     });
     return null;
   }
+  if (data === "custom_v2ray_inc_count" || data === "custom_v2ray_dec_count") {
+    try {
+      const state = await getState(userId);
+      if (!state || state.state !== "custom_v2ray_wizard") return null;
+      const p: any = state.payload || {};
+      const curQty = Math.max(1, Math.round(Number(p.quantity || 1)));
+      const nextQty = data === "custom_v2ray_inc_count" ? curQty + 1 : Math.max(1, curQty - 1);
+      await setState(userId, "custom_v2ray_wizard", { ...p, quantity: nextQty, messageId: Number(p.messageId || 0) });
+      await renderCustomV2rayWizard(chatId, userId, update.message.message_id);
+    } catch (e) {
+      logError("custom_v2ray_count_adjust_failed", e, { userId, chatId, data });
+      await tg("sendMessage", { chat_id: chatId, text: "خطا در بروزرسانی تعداد." });
+    }
+    return null;
+  }
   if (data === "custom_v2ray_inc_data" || data === "custom_v2ray_dec_data" || data === "custom_v2ray_inc_days" || data === "custom_v2ray_dec_days") {
     try {
       const state = await getState(userId);
@@ -11460,9 +11526,12 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
       if (!checkout) return null;
       await clearState(userId);
       await setState(userId, "await_custom_v2ray_name", { checkout });
+      const qty = Math.max(1, Math.round(Number(checkout.quantity || 1)));
       await tg("sendMessage", {
         chat_id: chatId,
-        text: "لطفاً یک نام برای کانفیگ خود انتخاب کنید:\n(اگر نام تکراری باشد، عدد تصادفی اضافه می‌شود)\n\nمثال: myVPN, config1, etc"
+        text: qty > 1
+          ? `برای ${qty} کانفیگ یک نام پایه انتخاب کنید:\n(کانفیگ‌ها به صورت نام_1، نام_2، ... ساخته می‌شوند)\n\nمثال: myVPN, config1, etc`
+          : "لطفاً یک نام برای کانفیگ خود انتخاب کنید:\n(اگر نام تکراری باشد، عدد تصادفی اضافه می‌شود)\n\nمثال: myVPN, config1, etc"
       });
     } catch (e) {
       logError("custom_v2ray_confirm_failed", e, { userId, chatId });
@@ -11561,12 +11630,14 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
       const totalPrice = Math.max(1, Math.round(Number(checkout.totalPrice || 0)));
       const dataMb = Math.max(1, Math.round(Number(checkout.dataMb || 0)));
       const days = Math.max(30, Math.round(Number(checkout.days || 30)));
+      const quantity = Math.max(1, Math.round(Number(checkout.quantity || 1)));
       const gb = Math.max(1, Math.round(dataMb / 1024));
       const configName = String(checkout.configName || "").trim() || undefined;
+      const configNames: string[] = Array.isArray(checkout.configNames) ? checkout.configNames : (configName ? [configName] : []);
       const overrides = {
         basePriceToman: totalPrice,
-        panelConfigPatch: { data_limit_mb: dataMb, expire_days: days, force_awaiting_config: true },
-        productNameSuffix: `(سفارشی ${gb}GB / ${days} روز)`,
+        panelConfigPatch: { data_limit_mb: dataMb, expire_days: days, force_awaiting_config: true, ...(quantity > 1 ? { bulk_quantity: quantity, bulk_config_names: configNames } : {}) },
+        productNameSuffix: `(سفارشی ${gb}GB / ${days} روز${quantity > 1 ? ` × ${quantity}` : ""})`,
         configName
       };
       await clearState(userId);
