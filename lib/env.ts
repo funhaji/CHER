@@ -22,12 +22,6 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 
-export const adminIds = env.ADMIN_IDS.split(",")
-  .map((x) => x.trim())
-  .filter(Boolean)
-  .map((x) => Number(x))
-  .filter((x) => Number.isFinite(x));
-
 const db = env.DATABASE_URL || env.POSTGRES_URL;
 if (!db) {
   throw new Error("DATABASE_URL or POSTGRES_URL is required");

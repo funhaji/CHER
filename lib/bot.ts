@@ -5164,6 +5164,42 @@ async function parseAndApplyState(
   animationFileId: string | null,
   state: UserState
 ) {
+  if (state.state === "await_bulk_quantity") {
+    const quantity = Number(text.trim());
+    if (!Number.isFinite(quantity) || quantity < 1 || quantity > 100) {
+      await tg("sendMessage", { chat_id: chatId, text: "تعداد باید عددی بین 1 تا 100 باشد." });
+      return true;
+    }
+    const productId = Number((state.payload as any)?.productId || 0);
+    await setState(userId, "await_config_name", { productId, quantity });
+    await tg("sendMessage", { 
+      chat_id: chatId, 
+      text: `برای ${quantity} عدد${quantity > 1 ? " از" : ""} محصول یک نام انتخاب کنید:\n(اگر نام تکراری باشد، عدد تصادفی اضافه می‌شود)\n\nمثال: config1, myVPN, etc` 
+    });
+    return true;
+  }
+  if (state.state === "await_config_name") {
+    const configName = text.trim();
+    if (!configName || configName.length < 1 || configName.length > 50) {
+      await tg("sendMessage", { chat_id: chatId, text: "نام باید بین 1 تا 50 کاراکتر باشد." });
+      return true;
+    }
+    const productId = Number((state.payload as any)?.productId || 0);
+    const quantity = Number((state.payload as any)?.quantity || 1);
+    
+    await clearState(userId);
+    
+    const userRows = await sql`SELECT wallet_balance FROM users WHERE telegram_id = ${userId} LIMIT 1;`;
+    const walletBalance = userRows.length ? Number(userRows[0].wallet_balance || 0) : 0;
+    if (walletBalance > 0) {
+      await setState(userId, "bulk_purchase_pending", { productId, quantity, configName });
+      await showWalletUsagePrompt(chatId, userId, productId, walletBalance);
+    } else {
+      await setState(userId, "bulk_purchase_pending", { productId, quantity, configName });
+      await showPaymentMethods(chatId, userId, productId, 0);
+    }
+    return true;
+  }
   if (state.state === "await_wallet_custom_amount") {
     const productId = Number(state.payload.productId);
     const amount = Number(text.trim());
@@ -5427,8 +5463,17 @@ async function parseAndApplyState(
     const productId = Number(state.payload.productId);
     const paymentMethod = String(state.payload.paymentMethod || "tronado");
     const walletUsed = Number(state.payload.walletUsed || 0);
+    const discountCode = text.trim() || null;
+    const quantity = Number((state.payload as any)?.quantity || 1);
+    const configName = (state.payload as any)?.configName;
+    
     await clearState(userId);
-    await createOrder(chatId, userId, productId, paymentMethod, text.trim() || null, walletUsed);
+    
+    if (quantity && quantity > 1 && configName) {
+      await createBulkOrders(chatId, userId, productId, paymentMethod, discountCode, walletUsed, quantity, configName);
+    } else {
+      await createOrder(chatId, userId, productId, paymentMethod, discountCode, walletUsed);
+    }
     return true;
   }
   if (state.state === "await_custom_discount_code") {
@@ -8394,6 +8439,7 @@ type OrderInsertInput = {
   tronAmount: number;
   status: string;
   walletUsed: number;
+  configName?: string | null;
   tronadoToken?: string | null;
   tronadoPaymentUrl?: string | null;
   plisioTxnId?: string | null;
@@ -8476,7 +8522,7 @@ async function insertOrderRecord(input: OrderInsertInput) {
         INSERT INTO orders
         (
           purchase_id, telegram_id, product_id, product_name_snapshot, sell_mode, source_panel_id, panel_delivery_mode, panel_config_snapshot,
-          payment_method, card_id, discount_code, discount_amount, final_price, tron_amount, status, wallet_used,
+          payment_method, card_id, discount_code, discount_amount, final_price, tron_amount, status, wallet_used, config_name,
           tronado_token, tronado_payment_url,
           plisio_txn_id, plisio_invoice_url, plisio_status,
           crypto_wallet_id, crypto_currency, crypto_network, crypto_address, crypto_amount, crypto_expires_at,
@@ -8485,7 +8531,7 @@ async function insertOrderRecord(input: OrderInsertInput) {
         SELECT
           ${input.purchaseId}, telegram_id, ${input.productId}, ${input.productNameSnapshot}, ${input.sellMode}, ${input.sourcePanelId}, ${input.panelDeliveryMode},
           ${panelConfigJson}::jsonb,
-          ${input.paymentMethod}, ${input.cardId ?? null}, ${input.discountCode}, ${discountAmount}, ${finalPrice}, ${tronAmount}, ${input.status}, ${walletUsed},
+          ${input.paymentMethod}, ${input.cardId ?? null}, ${input.discountCode}, ${discountAmount}, ${finalPrice}, ${tronAmount}, ${input.status}, ${walletUsed}, ${input.configName ?? null},
           ${input.tronadoToken ?? null}, ${input.tronadoPaymentUrl ?? null},
           ${input.plisioTxnId ?? null}, ${input.plisioInvoiceUrl ?? null}, ${input.plisioStatus ?? null},
           ${input.cryptoWalletId ?? null}, ${input.cryptoCurrency ?? null}, ${input.cryptoNetwork ?? null}, ${input.cryptoAddress ?? null}, ${input.cryptoAmount ?? null}, ${input.cryptoExpiresAt ?? null},
@@ -8512,7 +8558,7 @@ async function insertOrderRecord(input: OrderInsertInput) {
     INSERT INTO orders
     (
       purchase_id, telegram_id, product_id, product_name_snapshot, sell_mode, source_panel_id, panel_delivery_mode, panel_config_snapshot,
-      payment_method, card_id, discount_code, discount_amount, final_price, tron_amount, status, wallet_used,
+      payment_method, card_id, discount_code, discount_amount, final_price, tron_amount, status, wallet_used, config_name,
       tronado_token, tronado_payment_url,
       plisio_txn_id, plisio_invoice_url, plisio_status,
       crypto_wallet_id, crypto_currency, crypto_network, crypto_address, crypto_amount, crypto_expires_at,
@@ -8522,7 +8568,7 @@ async function insertOrderRecord(input: OrderInsertInput) {
     (
       ${input.purchaseId}, ${input.telegramId}, ${input.productId}, ${input.productNameSnapshot}, ${input.sellMode}, ${input.sourcePanelId}, ${input.panelDeliveryMode},
       ${panelConfigJson}::jsonb,
-      ${input.paymentMethod}, ${input.cardId ?? null}, ${input.discountCode}, ${discountAmount}, ${finalPrice}, ${tronAmount}, ${input.status}, ${walletUsed},
+      ${input.paymentMethod}, ${input.cardId ?? null}, ${input.discountCode}, ${discountAmount}, ${finalPrice}, ${tronAmount}, ${input.status}, ${walletUsed}, ${input.configName ?? null},
       ${input.tronadoToken ?? null}, ${input.tronadoPaymentUrl ?? null},
       ${input.plisioTxnId ?? null}, ${input.plisioInvoiceUrl ?? null}, ${input.plisioStatus ?? null},
       ${input.cryptoWalletId ?? null}, ${input.cryptoCurrency ?? null}, ${input.cryptoNetwork ?? null}, ${input.cryptoAddress ?? null}, ${input.cryptoAmount ?? null}, ${input.cryptoExpiresAt ?? null},
@@ -9294,6 +9340,84 @@ async function tryAutoApplyPanelTopup(topupRequestId: number, doneBy: number) {
   return { ok: true, message: result.message };
 }
 
+async function generateUniqueConfigName(baseName: string, userId: number, quantity: number, index: number) {
+  // For bulk: config1_1, config1_2, etc.
+  let name = `${baseName}_${index}`;
+  
+  // Check if this exact name exists for this user
+  const existing = await sql`
+    SELECT id FROM orders 
+    WHERE telegram_id = ${userId} AND config_name = ${name} 
+    LIMIT 1;
+  `;
+  
+  if (existing.length > 0 && quantity === 1) {
+    // If single item and name exists, add random number
+    const randomNum = Math.floor(Math.random() * 10000);
+    name = `${baseName}_${randomNum}`;
+  }
+  
+  return name;
+}
+
+async function createBulkOrders(
+  chatId: number,
+  userId: number,
+  productId: number,
+  paymentMethod: string,
+  discountInput: string | null,
+  walletUsedParam: number = 0,
+  quantity: number = 1,
+  baseName: string = "config"
+) {
+  // Create multiple orders with sequential names
+  let successCount = 0;
+  const purchaseIds: string[] = [];
+
+  for (let i = 1; i <= quantity; i++) {
+    try {
+      const configName = await generateUniqueConfigName(baseName, userId, quantity, i);
+      const overrides = { configName };
+      
+      const orderCreated = await createOrder(
+        chatId,
+        userId,
+        productId,
+        paymentMethod,
+        discountInput,
+        walletUsedParam,
+        overrides as any
+      );
+      
+      // Check if order was created by looking for the purchase ID returned
+      if (orderCreated) {
+        successCount++;
+        purchaseIds.push(orderCreated);
+      }
+    } catch (e) {
+      logError("bulk_order_creation_failed", e, { userId, productId, index: i, baseName });
+      // Continue to next order even if one fails
+    }
+  }
+
+  if (successCount === 0) {
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text: `❌ خطا: نتوانستیم سفارش شما را ثبت کنیم. لطفاً دوباره تلاش کنید یا از پشتیبانی کمک بگیرید.`
+    });
+    return null;
+  }
+
+  if (successCount < quantity) {
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text: `⚠️ ${successCount} از ${quantity} سفارش شما ثبت شد.\nتعداد ناموفق: ${quantity - successCount}\n\nلطفاً دوباره تلاش کنید.`
+    });
+  }
+
+  return purchaseIds[0] || null;
+}
+
 async function createOrder(
   chatId: number,
   userId: number,
@@ -9301,7 +9425,7 @@ async function createOrder(
   paymentMethod: string,
   discountInput: string | null,
   walletUsedParam: number = 0,
-  overrides: { basePriceToman?: number; panelConfigPatch?: Record<string, unknown>; productNameSuffix?: string } | null = null
+  overrides: { basePriceToman?: number; panelConfigPatch?: Record<string, unknown>; productNameSuffix?: string; configName?: string } | null = null
 ) {
   const globalInfinite = await getBoolSetting("global_infinite_mode", false);
   const rows = await sql`
@@ -9356,6 +9480,7 @@ async function createOrder(
     return;
   }
   const basePriceToman = Math.max(1, Math.round(Number(overrides?.basePriceToman ?? product.price_toman)));
+  const configName = overrides?.configName ? String(overrides.configName).trim() : null;
   const basePanelConfig = sanitizePanelConfig(product.panel_config);
   const panelConfigSnapshot = overrides?.panelConfigPatch ? { ...basePanelConfig, ...sanitizePanelConfig(overrides.panelConfigPatch) } : basePanelConfig;
   const productNameSnapshot = `${String(product.name || "")}${overrides?.productNameSuffix ? ` ${overrides.productNameSuffix}` : ""}`.trim();
@@ -9461,6 +9586,7 @@ async function createOrder(
           tronAmount: 0,
           status: "pending",
           walletUsed,
+          configName,
           walletTransactionDescription: `خرید محصول ${productNameSnapshot} (سفارش ${purchaseId})`
         })
       );
@@ -9566,6 +9692,7 @@ async function createOrder(
           tronAmount: 0,
           status: "awaiting_receipt",
           walletUsed,
+          configName,
           walletTransactionDescription: `خرید محصول ${productNameSnapshot} (سفارش ${purchaseId})`
         })
       );
@@ -9705,6 +9832,7 @@ async function createOrder(
           tronAmount: 0,
           status: "pending",
           walletUsed,
+          configName,
           cryptoWalletId: Number(w.id),
           cryptoCurrency: String(w.currency),
           cryptoNetwork: String(w.network),
@@ -9885,6 +10013,7 @@ async function createOrder(
           tronAmount: 0,
           status: "pending",
           walletUsed,
+          configName,
           swapwalletInvoiceId: invoiceId,
           swapwalletPaymentUrl: primaryUrl,
           swapwalletStatus: "new",
@@ -9979,6 +10108,7 @@ async function createOrder(
           tronAmount: 0,
           status: "pending",
           walletUsed,
+          configName,
           tronadoToken: orderRes.authority,
           tronadoPaymentUrl: orderRes.paymentUrlBot,
           walletTransactionDescription: `خرید محصول ${productNameSnapshot} (سفارش ${purchaseId})`
@@ -11124,13 +11254,45 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
   }
   if (data.startsWith("buy_product_")) {
     const productId = Number(data.replace("buy_product_", ""));
-    const userRows = await sql`SELECT wallet_balance FROM users WHERE telegram_id = ${userId} LIMIT 1;`;
-    const walletBalance = userRows.length ? Number(userRows[0].wallet_balance || 0) : 0;
-    if (walletBalance > 0) {
-      await showWalletUsagePrompt(chatId, userId, productId, walletBalance);
+    await setState(userId, "await_bulk_quantity", { productId });
+    
+    const quantityKeyboard = [
+      [cb("1️⃣ 1 عدد", "bulk_qty_1"), cb("2️⃣ 2 عدد", "bulk_qty_2"), cb("3️⃣ 3 عدد", "bulk_qty_3")],
+      [cb("4️⃣ 4 عدد", "bulk_qty_4"), cb("5️⃣ 5 عدد", "bulk_qty_5"), cb("➕ سفارشی", "bulk_qty_custom")],
+      [homeButton()]
+    ];
+    
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text: "چند عدد از این محصول می‌خواهید؟",
+      reply_markup: { inline_keyboard: quantityKeyboard }
+    });
+    return;
+  }
+  if (data.startsWith("bulk_qty_")) {
+    const state = await getState(userId);
+    if (!state || state.state !== "await_bulk_quantity") return;
+    
+    const qtyStr = data.replace("bulk_qty_", "");
+    let quantity = 1;
+    if (qtyStr === "custom") {
+      await tg("sendMessage", { chat_id: chatId, text: "تعداد مورد نظر را وارد کنید (1-100):" });
+      return;
     } else {
-      await showPaymentMethods(chatId, userId, productId, 0);
+      quantity = Number(qtyStr);
     }
+    
+    if (quantity < 1 || quantity > 100) {
+      await tg("sendMessage", { chat_id: chatId, text: "تعداد باید بین 1 تا 100 باشد." });
+      return;
+    }
+    
+    const productId = Number((state.payload as any)?.productId || 0);
+    await setState(userId, "await_config_name", { productId, quantity });
+    await tg("sendMessage", { 
+      chat_id: chatId, 
+      text: `برای ${quantity} عدد${quantity > 1 ? " از" : ""} محصول یک نام انتخاب کنید:\n(اگر نام تکراری باشد، عدد تصادفی اضافه می‌شود)\n\nمثال: config1, myVPN, etc` 
+    });
     return;
   }
   if (data === "custom_v2ray_inc_data" || data === "custom_v2ray_dec_data" || data === "custom_v2ray_inc_days" || data === "custom_v2ray_dec_days") {
@@ -11286,6 +11448,10 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     const parts = data.replace("use_wallet_", "").split("_");
     const productId = Number(parts[0]);
     const amount = Number(parts[1]);
+    const state = await getState(userId);
+    if (state?.state === "bulk_purchase_pending") {
+      await setState(userId, "bulk_purchase_pending", { ...state.payload, walletUsed: amount });
+    }
     await showPaymentMethods(chatId, userId, productId, amount);
     return;
   }
@@ -11298,6 +11464,11 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
       walletUsed = Number(parts.pop());
     }
     const paymentMethod = parts.slice(1).join("_");
+    const state = await getState(userId);
+    if (state?.state === "bulk_purchase_pending") {
+      const bulkData = state.payload as any;
+      await setState(userId, "bulk_purchase_pending", { ...bulkData, paymentMethod, walletUsed });
+    }
     await showDiscountChoice(chatId, productId, paymentMethod, walletUsed);
     return;
   }
@@ -11338,7 +11509,13 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
       walletUsed = Number(parts.pop());
     }
     const paymentMethod = parts.slice(1).join("_");
-    await setState(userId, "await_discount_code", { productId, paymentMethod, walletUsed });
+    const state = await getState(userId);
+    if (state?.state === "bulk_purchase_pending") {
+      const bulkData = state.payload as any;
+      await setState(userId, "await_discount_code", { ...bulkData, productId, paymentMethod, walletUsed });
+    } else {
+      await setState(userId, "await_discount_code", { productId, paymentMethod, walletUsed });
+    }
     await tg("sendMessage", { chat_id: chatId, text: "کد تخفیف را ارسال کنید:" });
     return;
   }
@@ -11351,8 +11528,18 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
       walletUsed = Number(parts.pop());
     }
     const paymentMethod = parts.slice(1).join("_");
-    await clearState(userId);
-    await createOrder(chatId, userId, productId, paymentMethod, null, walletUsed);
+    const state = await getState(userId);
+    
+    if (state?.state === "bulk_purchase_pending") {
+      const bulkData = state.payload as any;
+      const quantity = Number(bulkData.quantity || 1);
+      const configName = String(bulkData.configName || "config");
+      await clearState(userId);
+      await createBulkOrders(chatId, userId, productId, paymentMethod, null, walletUsed, quantity, configName);
+    } else {
+      await clearState(userId);
+      await createOrder(chatId, userId, productId, paymentMethod, null, walletUsed);
+    }
     return;
   }
   if (data.startsWith("check_order_")) {

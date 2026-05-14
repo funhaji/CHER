@@ -353,6 +353,11 @@ export function ensureSchema() {
       await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'tronado';`;
       await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS receipt_file_id TEXT;`;
       await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS admin_decision_by BIGINT;`;
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS config_name TEXT;`;
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INT NOT NULL DEFAULT 1;`;
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS retry_parent_order_id BIGINT REFERENCES orders(id);`;
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0;`;
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS config_error_message TEXT;`;
       await sql`ALTER TABLE panels ADD COLUMN IF NOT EXISTS allow_new_sales BOOLEAN NOT NULL DEFAULT FALSE;`;
       await sql`ALTER TABLE panels ADD COLUMN IF NOT EXISTS last_check_at TIMESTAMPTZ;`;
       await sql`ALTER TABLE panels ADD COLUMN IF NOT EXISTS last_check_ok BOOLEAN;`;
