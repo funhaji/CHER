@@ -14225,16 +14225,6 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     else if (period === "month") label = "۳۰ روز اخیر";
     else return null;
 
-    // Helper to build typed date-filtered queries
-    const periodFilter = (col: string) =>
-      period === "today"
-        ? sql`DATE(${sql.unsafe(col)}) = CURRENT_DATE`
-        : period === "yesterday"
-          ? sql`DATE(${sql.unsafe(col)}) = CURRENT_DATE - INTERVAL '1 day'`
-          : period === "week"
-            ? sql`${sql.unsafe(col)} >= NOW() - INTERVAL '7 days'`
-            : sql`${sql.unsafe(col)} >= NOW() - INTERVAL '30 days'`;
-
     const ordersStats = period === "today"
       ? await sql`
           SELECT
