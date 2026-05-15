@@ -14187,7 +14187,7 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     await tg("sendMessage", {
       chat_id: chatId,
       text:
-        `آمار کلی:\n` +
+        `📊 آمار کلی (همه زمان‌ها):\n\n` +
         `دیتای فروخته‌شده: ${totalMb}MB (${totalGb}GB)\n` +
         `درآمد کل: ${formatPriceToman(totalEarning)} تومان\n` +
         `کل کاربران: ${Number(m3[0].total_users || 0)}\n` +
@@ -14199,8 +14199,186 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
         `انتقال‌های در صف: ${Number(m5[0].migrations_pending || 0)}`,
       reply_markup: {
         inline_keyboard: [
+          [
+            cb("📅 امروز", "admin_stats_period_today", "primary"),
+            cb("📅 دیروز", "admin_stats_period_yesterday", "primary"),
+          ],
+          [
+            cb("📅 هفته اخیر", "admin_stats_period_week", "primary"),
+            cb("📅 ماه اخیر", "admin_stats_period_month", "primary"),
+          ],
           [cb("👥 مشتریان هر محصول", "admin_stats_buyers", "primary")],
           [backButton("admin_panel")]
+        ]
+      }
+    });
+    return null;
+  }
+
+  if (data.startsWith("admin_stats_period_")) {
+    const period = data.replace("admin_stats_period_", "");
+    let label = "";
+
+    if (period === "today") label = "امروز";
+    else if (period === "yesterday") label = "دیروز";
+    else if (period === "week") label = "۷ روز اخیر";
+    else if (period === "month") label = "۳۰ روز اخیر";
+    else return null;
+
+    // Helper to build typed date-filtered queries
+    const periodFilter = (col: string) =>
+      period === "today"
+        ? sql`DATE(${sql.unsafe(col)}) = CURRENT_DATE`
+        : period === "yesterday"
+          ? sql`DATE(${sql.unsafe(col)}) = CURRENT_DATE - INTERVAL '1 day'`
+          : period === "week"
+            ? sql`${sql.unsafe(col)} >= NOW() - INTERVAL '7 days'`
+            : sql`${sql.unsafe(col)} >= NOW() - INTERVAL '30 days'`;
+
+    const ordersStats = period === "today"
+      ? await sql`
+          SELECT
+            COUNT(*)::int AS total_orders,
+            COUNT(*) FILTER (WHERE o.status IN ('paid','awaiting_config'))::int AS successful_orders,
+            COUNT(*) FILTER (WHERE o.status = 'pending')::int AS pending_orders,
+            COUNT(*) FILTER (WHERE o.status IN ('denied','cancelled'))::int AS failed_orders,
+            COUNT(DISTINCT o.telegram_id)::int AS unique_customers,
+            COALESCE(SUM(o.final_price) FILTER (WHERE o.status IN ('paid','awaiting_config')), 0)::bigint AS revenue_toman,
+            COALESCE(SUM(o.wallet_used) FILTER (WHERE o.status IN ('paid','awaiting_config')), 0)::bigint AS wallet_used_toman,
+            COALESCE(SUM(CASE WHEN o.status IN ('paid','awaiting_config') AND COALESCE(p.panel_config->>'product_kind','v2ray') != 'account' THEN p.size_mb ELSE 0 END), 0)::bigint AS sold_mb
+          FROM orders o INNER JOIN products p ON p.id = o.product_id
+          WHERE DATE(o.created_at) = CURRENT_DATE`
+      : period === "yesterday"
+        ? await sql`
+            SELECT
+              COUNT(*)::int AS total_orders,
+              COUNT(*) FILTER (WHERE o.status IN ('paid','awaiting_config'))::int AS successful_orders,
+              COUNT(*) FILTER (WHERE o.status = 'pending')::int AS pending_orders,
+              COUNT(*) FILTER (WHERE o.status IN ('denied','cancelled'))::int AS failed_orders,
+              COUNT(DISTINCT o.telegram_id)::int AS unique_customers,
+              COALESCE(SUM(o.final_price) FILTER (WHERE o.status IN ('paid','awaiting_config')), 0)::bigint AS revenue_toman,
+              COALESCE(SUM(o.wallet_used) FILTER (WHERE o.status IN ('paid','awaiting_config')), 0)::bigint AS wallet_used_toman,
+              COALESCE(SUM(CASE WHEN o.status IN ('paid','awaiting_config') AND COALESCE(p.panel_config->>'product_kind','v2ray') != 'account' THEN p.size_mb ELSE 0 END), 0)::bigint AS sold_mb
+            FROM orders o INNER JOIN products p ON p.id = o.product_id
+            WHERE DATE(o.created_at) = CURRENT_DATE - INTERVAL '1 day'`
+        : period === "week"
+          ? await sql`
+              SELECT
+                COUNT(*)::int AS total_orders,
+                COUNT(*) FILTER (WHERE o.status IN ('paid','awaiting_config'))::int AS successful_orders,
+                COUNT(*) FILTER (WHERE o.status = 'pending')::int AS pending_orders,
+                COUNT(*) FILTER (WHERE o.status IN ('denied','cancelled'))::int AS failed_orders,
+                COUNT(DISTINCT o.telegram_id)::int AS unique_customers,
+                COALESCE(SUM(o.final_price) FILTER (WHERE o.status IN ('paid','awaiting_config')), 0)::bigint AS revenue_toman,
+                COALESCE(SUM(o.wallet_used) FILTER (WHERE o.status IN ('paid','awaiting_config')), 0)::bigint AS wallet_used_toman,
+                COALESCE(SUM(CASE WHEN o.status IN ('paid','awaiting_config') AND COALESCE(p.panel_config->>'product_kind','v2ray') != 'account' THEN p.size_mb ELSE 0 END), 0)::bigint AS sold_mb
+              FROM orders o INNER JOIN products p ON p.id = o.product_id
+              WHERE o.created_at >= NOW() - INTERVAL '7 days'`
+          : await sql`
+              SELECT
+                COUNT(*)::int AS total_orders,
+                COUNT(*) FILTER (WHERE o.status IN ('paid','awaiting_config'))::int AS successful_orders,
+                COUNT(*) FILTER (WHERE o.status = 'pending')::int AS pending_orders,
+                COUNT(*) FILTER (WHERE o.status IN ('denied','cancelled'))::int AS failed_orders,
+                COUNT(DISTINCT o.telegram_id)::int AS unique_customers,
+                COALESCE(SUM(o.final_price) FILTER (WHERE o.status IN ('paid','awaiting_config')), 0)::bigint AS revenue_toman,
+                COALESCE(SUM(o.wallet_used) FILTER (WHERE o.status IN ('paid','awaiting_config')), 0)::bigint AS wallet_used_toman,
+                COALESCE(SUM(CASE WHEN o.status IN ('paid','awaiting_config') AND COALESCE(p.panel_config->>'product_kind','v2ray') != 'account' THEN p.size_mb ELSE 0 END), 0)::bigint AS sold_mb
+              FROM orders o INNER JOIN products p ON p.id = o.product_id
+              WHERE o.created_at >= NOW() - INTERVAL '30 days'`;
+
+    const newUsers = period === "today"
+      ? await sql`SELECT COUNT(*)::int AS cnt FROM users WHERE DATE(created_at) = CURRENT_DATE`
+      : period === "yesterday"
+        ? await sql`SELECT COUNT(*)::int AS cnt FROM users WHERE DATE(created_at) = CURRENT_DATE - INTERVAL '1 day'`
+        : period === "week"
+          ? await sql`SELECT COUNT(*)::int AS cnt FROM users WHERE created_at >= NOW() - INTERVAL '7 days'`
+          : await sql`SELECT COUNT(*)::int AS cnt FROM users WHERE created_at >= NOW() - INTERVAL '30 days'`;
+
+    const topupStats = period === "today"
+      ? await sql`SELECT COALESCE(SUM(requested_mb), 0)::bigint AS topup_mb FROM topup_requests WHERE status = 'done' AND DATE(done_at) = CURRENT_DATE`
+      : period === "yesterday"
+        ? await sql`SELECT COALESCE(SUM(requested_mb), 0)::bigint AS topup_mb FROM topup_requests WHERE status = 'done' AND DATE(done_at) = CURRENT_DATE - INTERVAL '1 day'`
+        : period === "week"
+          ? await sql`SELECT COALESCE(SUM(requested_mb), 0)::bigint AS topup_mb FROM topup_requests WHERE status = 'done' AND done_at >= NOW() - INTERVAL '7 days'`
+          : await sql`SELECT COALESCE(SUM(requested_mb), 0)::bigint AS topup_mb FROM topup_requests WHERE status = 'done' AND done_at >= NOW() - INTERVAL '30 days'`;
+
+    const topProducts = period === "today"
+      ? await sql`SELECT COALESCE(o.product_name_snapshot, p.name) AS name, COUNT(*)::int AS cnt FROM orders o LEFT JOIN products p ON p.id = o.product_id WHERE o.status IN ('paid','awaiting_config') AND DATE(o.created_at) = CURRENT_DATE GROUP BY 1 ORDER BY cnt DESC LIMIT 5`
+      : period === "yesterday"
+        ? await sql`SELECT COALESCE(o.product_name_snapshot, p.name) AS name, COUNT(*)::int AS cnt FROM orders o LEFT JOIN products p ON p.id = o.product_id WHERE o.status IN ('paid','awaiting_config') AND DATE(o.created_at) = CURRENT_DATE - INTERVAL '1 day' GROUP BY 1 ORDER BY cnt DESC LIMIT 5`
+        : period === "week"
+          ? await sql`SELECT COALESCE(o.product_name_snapshot, p.name) AS name, COUNT(*)::int AS cnt FROM orders o LEFT JOIN products p ON p.id = o.product_id WHERE o.status IN ('paid','awaiting_config') AND o.created_at >= NOW() - INTERVAL '7 days' GROUP BY 1 ORDER BY cnt DESC LIMIT 5`
+          : await sql`SELECT COALESCE(o.product_name_snapshot, p.name) AS name, COUNT(*)::int AS cnt FROM orders o LEFT JOIN products p ON p.id = o.product_id WHERE o.status IN ('paid','awaiting_config') AND o.created_at >= NOW() - INTERVAL '30 days' GROUP BY 1 ORDER BY cnt DESC LIMIT 5`;
+
+    const paymentMethods = period === "today"
+      ? await sql`SELECT payment_method, COUNT(*)::int AS cnt FROM orders WHERE status IN ('paid','awaiting_config') AND DATE(created_at) = CURRENT_DATE GROUP BY payment_method ORDER BY cnt DESC`
+      : period === "yesterday"
+        ? await sql`SELECT payment_method, COUNT(*)::int AS cnt FROM orders WHERE status IN ('paid','awaiting_config') AND DATE(created_at) = CURRENT_DATE - INTERVAL '1 day' GROUP BY payment_method ORDER BY cnt DESC`
+        : period === "week"
+          ? await sql`SELECT payment_method, COUNT(*)::int AS cnt FROM orders WHERE status IN ('paid','awaiting_config') AND created_at >= NOW() - INTERVAL '7 days' GROUP BY payment_method ORDER BY cnt DESC`
+          : await sql`SELECT payment_method, COUNT(*)::int AS cnt FROM orders WHERE status IN ('paid','awaiting_config') AND created_at >= NOW() - INTERVAL '30 days' GROUP BY payment_method ORDER BY cnt DESC`;
+
+    const stats = ordersStats[0] || {};
+    const soldMbPeriod = Number(stats.sold_mb || 0);
+    const topupMbPeriod = Number(topupStats[0]?.topup_mb || 0);
+    const totalMbPeriod = soldMbPeriod + topupMbPeriod;
+    const revenueToman = Number(stats.revenue_toman || 0);
+    const walletUsedToman = Number(stats.wallet_used_toman || 0);
+    const totalRevenue = revenueToman + walletUsedToman;
+
+    const productLines = topProducts.length
+      ? topProducts.map((p: any, i: number) => `  ${i + 1}. ${String(p.name || "-")} (${Number(p.cnt || 0)} سفارش)`).join("\n")
+      : "  —";
+
+    const paymentLines = paymentMethods.length
+      ? paymentMethods.map((m: any) => `  ${formatPaymentMethodTitle(m.payment_method)}: ${Number(m.cnt || 0)}`).join("\n")
+      : "  —";
+
+    const lines = [
+      `📊 آمار بازه: ${label}`,
+      ``,
+      `💰 درآمد`,
+      `  پرداخت نقدی: ${formatPriceToman(revenueToman)} تومان`,
+      `  از کیف پول: ${formatPriceToman(walletUsedToman)} تومان`,
+      `  جمع کل: ${formatPriceToman(totalRevenue)} تومان`,
+      ``,
+      `📦 سفارش‌ها`,
+      `  کل: ${Number(stats.total_orders || 0)}`,
+      `  موفق: ${Number(stats.successful_orders || 0)}`,
+      `  در انتظار: ${Number(stats.pending_orders || 0)}`,
+      `  رد/لغو: ${Number(stats.failed_orders || 0)}`,
+      ``,
+      `📶 دیتا`,
+      `  فروش محصول: ${soldMbPeriod}MB (${(soldMbPeriod / 1024).toFixed(2)}GB)`,
+      `  افزایش دیتا: ${topupMbPeriod}MB`,
+      `  جمع: ${totalMbPeriod}MB (${(totalMbPeriod / 1024).toFixed(2)}GB)`,
+      ``,
+      `👥 کاربران`,
+      `  مشتریان منحصربفرد: ${Number(stats.unique_customers || 0)}`,
+      `  کاربران جدید: ${Number(newUsers[0]?.cnt || 0)}`,
+      ``,
+      `🏆 پرفروش‌ترین محصولات`,
+      productLines,
+      ``,
+      `💳 روش‌های پرداخت`,
+      paymentLines,
+    ];
+
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text: lines.join("\n"),
+      reply_markup: {
+        inline_keyboard: [
+          [
+            cb("📅 امروز", "admin_stats_period_today", period === "today" ? "success" : "primary"),
+            cb("📅 دیروز", "admin_stats_period_yesterday", period === "yesterday" ? "success" : "primary"),
+          ],
+          [
+            cb("📅 هفته اخیر", "admin_stats_period_week", period === "week" ? "success" : "primary"),
+            cb("📅 ماه اخیر", "admin_stats_period_month", period === "month" ? "success" : "primary"),
+          ],
+          [backButton("admin_stats", "🔙 آمار کلی")]
         ]
       }
     });
