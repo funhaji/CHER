@@ -3325,8 +3325,9 @@ export async function regenerateSanaeiClientLink(
   const found = await findSanaeiClientByIdentifier(panel, identifier);
   if (!found.ok || !found.loginCookie || !found.inboundId || !found.clientKey) return found;
   
-  // Create a new UUID
+  // Create a new UUID and new subId to revoke both config links and subscription URL
   const newUuid = crypto.randomUUID();
+  const newSubId = randomCode(16).toLowerCase();
   const updateRes = await fetchWithTimeout(
     `${normalizeBaseUrl(String(panel.base_url))}/panel/api/inbounds/updateClient/${encodeURIComponent(String(found.clientKey))}`,
     {
@@ -3338,7 +3339,7 @@ export async function regenerateSanaeiClientLink(
       },
       body: JSON.stringify({
         id: found.inboundId,
-        settings: JSON.stringify({ clients: [{ ...found.client, id: newUuid }] })
+        settings: JSON.stringify({ clients: [{ ...found.client, id: newUuid, subId: newSubId }] })
       })
     }
   );
@@ -3348,7 +3349,7 @@ export async function regenerateSanaeiClientLink(
   if (!ok) {
     return { ok: false, message: `Sanaei link regen failed: ${updateRes.status} ${responseSnippet(updateRaw)}` };
   }
-  return { ok: true, message: "link_regenerated", client: { ...found.client, id: newUuid }, inboundId: found.inboundId, inbound: found.inbound };
+  return { ok: true, message: "link_regenerated", client: { ...found.client, id: newUuid, subId: newSubId }, inboundId: found.inboundId, inbound: found.inbound };
 }
 
 export async function deleteMarzbanUser(
@@ -3437,6 +3438,7 @@ async function performRegenLink(
   
   let regenMessage = "عملیات انجام نشد.";
   let newUuid: string | undefined;
+  let newSubIdForMeta: string | undefined;
   let newConfigLinks: string[] = [];
   let newSubscriptionUrl: string | undefined;
   
@@ -3457,6 +3459,7 @@ async function performRegenLink(
     if (result.ok && result.client && result.inbound) {
       regenMessage = "تغییر لینک با موفقیت انجام شد ✅";
       newUuid = String((result.client as any).id || "");
+      newSubIdForMeta = String((result.client as any).subId || "") || undefined;
       const panelConfig = (typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : (row.panel_config as Record<string, unknown>)) || {};
       const mergedCfg = mergeSanaeiPanelRowIntoClientConfig(panelConfig, panelRows[0] as Record<string, unknown>);
       newConfigLinks = buildSanaeiConfigLinks(
@@ -3490,6 +3493,8 @@ async function performRegenLink(
   if (newConfigLinks.length > 0) updatedDelivery.configLinks = newConfigLinks;
   if (newSubscriptionUrl) updatedDelivery.subscriptionUrl = newSubscriptionUrl;
   if (newUuid && updatedDelivery.metadata) updatedDelivery.metadata.uuid = newUuid;
+  // Save the new subId so future lookups use the updated identifier (sanaei only)
+  if (newSubIdForMeta && updatedDelivery.metadata) updatedDelivery.metadata.subId = newSubIdForMeta;
   
   const newConfigValue = newSubscriptionUrl || newConfigLinks[0] || String(row.config_value);
   
