@@ -3129,12 +3129,22 @@ async function findSanaeiClientByIdentifier(
         return false;
       });
       if (!matched) continue;
+      const clientStats = Array.isArray(inbound.clientStats)
+        ? (inbound.clientStats as Array<Record<string, unknown>>).find(
+            (s) =>
+              String(s.email || "").toLowerCase() === email.toLowerCase() ||
+              String(s.email || "").toLowerCase() === id.toLowerCase()
+          )
+        : undefined;
+      const mergedClient = clientStats
+        ? { ...client, up: Number(clientStats.up || 0), down: Number(clientStats.down || 0) }
+        : client;
       return {
         ok: true,
         loginCookie: login.cookie,
         inboundId: Number(inbound.id || 0),
         inbound,
-        client,
+        client: mergedClient,
         clientKey: id || email || subId,
         message: "ok"
       };
@@ -3150,15 +3160,14 @@ export async function revokeSanaeiClient(
   const found = await findSanaeiClientByIdentifier(panel, identifier);
   if (!found.ok || !found.loginCookie || !found.inboundId || !found.clientKey) return found;
   const delRes = await fetchWithTimeout(
-    `${normalizeBaseUrl(String(panel.base_url))}/panel/api/inbounds/delClient/${encodeURIComponent(String(found.clientKey))}`,
+    `${normalizeBaseUrl(String(panel.base_url))}/panel/api/inbounds/${found.inboundId}/delClient/${encodeURIComponent(String(found.clientKey))}`,
     {
       method: "POST",
       headers: {
         Accept: "application/json",
         Cookie: found.loginCookie,
         "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ id: found.inboundId })
+      }
     }
   );
   const delRaw = await delRes.text();
@@ -3400,7 +3409,7 @@ async function performRegenLink(
     return null;
   }
   const row = rows[0];
-  if (!isAdminReq && row.owner_telegram_id !== actorUserId) {
+  if (!isAdminReq && Number(row.owner_telegram_id) !== actorUserId) {
     await tg("sendMessage", { chat_id: chatId, text: "این کانفیگ متعلق به شما نیست." });
     return null;
   }
@@ -3626,7 +3635,7 @@ async function buildInventoryPanelRuntimeDetails(
       return `🖥 پنل: ${String(panel.name || "-")} (3x-ui)\n📡 جزئیات لحظه‌ای: ناموفق`;
     }
     const client = found.client as Record<string, unknown>;
-    const totalBytes = Number(client.totalGB || 0);
+    const totalBytes = Number(client.totalGB || 0) * 1024 * 1024 * 1024;
     const usedBytes = Math.max(0, Number(client.up || 0) + Number(client.down || 0));
     const remainBytes = totalBytes > 0 ? Math.max(0, totalBytes - usedBytes) : 0;
     return (
@@ -10470,7 +10479,7 @@ async function createOrder(
 
 async function showMyConfigs(chatId: number, userId: number, forTopupFlow: boolean) {
   const rows = await sql`
-    SELECT i.id, i.config_value, i.delivery_payload, i.panel_id, p.panel_config, p.name, o.purchase_id
+    SELECT i.id, i.config_value, i.delivery_payload, i.panel_id, p.panel_config, p.name, p.size_mb, o.purchase_id
     FROM inventory i
     INNER JOIN products p ON p.id = i.product_id
     LEFT JOIN orders o ON o.id = i.sold_order_id
@@ -10511,7 +10520,9 @@ async function showMyConfigs(chatId: number, userId: number, forTopupFlow: boole
             hostHint = outboundHost;
           }
         }
-        return `🔹 ${title}${revoked ? " 🚫" : ""} | سفارش ${row.purchase_id || "#-"} | ${configSummaryLine(summaryPayload, hostHint)}`;
+        const sizeMb = Number(row.size_mb || 0);
+        const sizeLabel = sizeMb >= 1024 ? `${(sizeMb / 1024).toFixed(0)}GB` : sizeMb > 0 ? `${sizeMb}MB` : "";
+        return `🔹 ${title}${revoked ? " 🚫" : ""}${sizeLabel ? ` | ${sizeLabel}` : ""}`;
       })(),
       callback_data: `open_config_${row.id}${forTopupFlow ? "_t" : ""}`
     }
@@ -10550,7 +10561,8 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
   const isPanelConfig = Boolean(delivery.metadata?.panelType) && String(delivery.metadata?.panelType || "") !== "manual";
   const panelId = Number(row.panel_id || 0);
 
-  // Validate panel config link matches
+  // Validate panel config link matches and collect live stats
+  let liveStats: string | null = null;
   if (isPanelConfig && panelId > 0) {
     const panelRows = await sql`SELECT * FROM panels WHERE id = ${panelId} LIMIT 1;`;
     if (panelRows.length > 0) {
@@ -10567,7 +10579,16 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
         const found = await lookupMarzbanUser(panel, identifier);
         if (found.ok && found.user) {
           foundOnPanel = true;
-          panelSubLink = String((found.user as Record<string, unknown>).subscription_url || "").trim();
+          const u = found.user as Record<string, unknown>;
+          panelSubLink = String(u.subscription_url || "").trim();
+          const totalBytes = Number(u.data_limit || 0);
+          const usedBytes = Number(u.used_traffic || u.usedTraffic || u.used_bytes || 0);
+          const remainBytes = totalBytes > 0 ? Math.max(0, totalBytes - usedBytes) : 0;
+          const statusLabel = String(u.status || "-");
+          liveStats =
+            `📶 وضعیت: ${statusLabel}\n` +
+            `📊 حجم: ${totalBytes > 0 ? `${formatBytesShort(remainBytes)} باقی‌مانده از ${formatBytesShort(totalBytes)}` : "نامحدود"}\n` +
+            `📅 انقضا: ${formatExpiryLabelFromSeconds(u.expire)}`;
         } else if (found.message !== "user_not_found") {
           panelError = true;
         }
@@ -10575,7 +10596,8 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
         const found = await findSanaeiClientByIdentifier(panel, identifier);
         if (found.ok && found.client) {
           foundOnPanel = true;
-          const subId = String((found.client as Record<string, unknown>).subId || "");
+          const c = found.client as Record<string, unknown>;
+          const subId = String(c.subId || "");
           const panelConfig = typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : (row.panel_config as Record<string, unknown>);
           if (subId) {
             panelSubLink = buildSanaeiSubscriptionUrl(
@@ -10585,6 +10607,14 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
               panel as Record<string, unknown>
             ).trim();
           }
+          const totalBytes = Number(c.totalGB || 0) * 1024 * 1024 * 1024;
+          const usedBytes = Math.max(0, Number(c.up || 0) + Number(c.down || 0));
+          const remainBytes = totalBytes > 0 ? Math.max(0, totalBytes - usedBytes) : 0;
+          const enabled = parseMaybeBoolean(c.enable) !== false;
+          liveStats =
+            `📶 وضعیت: ${enabled ? "فعال ✅" : "غیرفعال ❌"}\n` +
+            `📊 حجم: ${totalBytes > 0 ? `${formatBytesShort(remainBytes)} باقی‌مانده از ${formatBytesShort(totalBytes)}` : "نامحدود"}\n` +
+            `📅 انقضا: ${formatExpiryLabelFromMilliseconds(c.expiryTime)}`;
         } else if (found.message !== "client_not_found") {
           panelError = true;
         }
@@ -10661,7 +10691,7 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
     String(row.config_value),
     displayDelivery,
     keyboard,
-    `محصول: ${row.name}`
+    `محصول: ${row.name}${liveStats ? `\n\n${liveStats}` : ""}`
   );
 }
 
