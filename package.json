@@ -1,23 +1,16 @@
 {
-  "name": "telegram-seller-bot",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
+  "name": "workspace",
+  "version": "0.0.0",
+  "license": "MIT",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit",
-    "lint": "npm run typecheck"
+    "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
+    "build": "pnpm run typecheck && pnpm -r --if-present run build",
+    "typecheck:libs": "tsc --build",
+    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
   },
-  "dependencies": {
-    "@neondatabase/serverless": "^0.10.4",
-    "postgres": "^3.4.5",
-    "@vercel/node": "^3.2.17",
-    "ssh2": "^1.16.0",
-    "zod": "^3.23.8"
-  },
+  "private": true,
   "devDependencies": {
-    "@types/node": "^22.10.2",
-    "@types/ssh2": "^1.15.0",
-    "typescript": "^5.7.2"
+    "prettier": "^3.8.3",
+    "typescript": "~5.9.3"
   }
 }
