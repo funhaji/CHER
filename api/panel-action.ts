@@ -173,6 +173,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           newDelivery.subscriptionUrl = newSubscriptionUrl;
           newDelivery.configLinks = newConfigLinks;
           newDelivery.primaryText = newSubscriptionUrl || newConfigLinks[0] || clientKey;
+          if (subId && newDelivery.metadata) newDelivery.metadata.subId = subId;
           
           await sql`
             UPDATE inventory 
