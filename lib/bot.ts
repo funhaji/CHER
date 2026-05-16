@@ -3640,7 +3640,7 @@ async function buildInventoryPanelRuntimeDetails(
       return `🖥 پنل: ${String(panel.name || "-")} (3x-ui)\n📡 جزئیات لحظه‌ای: ناموفق`;
     }
     const client = found.client as Record<string, unknown>;
-    const totalBytes = Number(client.totalGB || 0) * 1024 * 1024 * 1024;
+    const totalBytes = Number(client.totalGB || 0); // stored in bytes despite the field name
     const usedBytes = Math.max(0, Number(client.up || 0) + Number(client.down || 0));
     const remainBytes = totalBytes > 0 ? Math.max(0, totalBytes - usedBytes) : 0;
     return (
@@ -10597,7 +10597,7 @@ async function openMyConfig(chatId: number, userId: number, inventoryId: number,
               panel as Record<string, unknown>
             ).trim();
           }
-          const totalBytes = Number(c.totalGB || 0) * 1024 * 1024 * 1024;
+          const totalBytes = Number(c.totalGB || 0); // stored in bytes despite the field name
           const usedBytes = Math.max(0, Number(c.up || 0) + Number(c.down || 0));
           const remainBytes = totalBytes > 0 ? Math.max(0, totalBytes - usedBytes) : 0;
           const enabled = parseMaybeBoolean(c.enable) !== false;
