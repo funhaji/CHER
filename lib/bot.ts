@@ -10482,7 +10482,22 @@ async function createOrder(
   return null;
 }
 
-async function showMyConfigs(chatId: number, userId: number, forTopupFlow: boolean) {
+const CONFIGS_PER_PAGE = 8;
+
+async function showMyConfigs(chatId: number, userId: number, forTopupFlow: boolean, page = 0) {
+  const countRows = await sql`
+    SELECT COUNT(*) AS total
+    FROM inventory i
+    WHERE i.owner_telegram_id = ${userId} AND i.status = 'sold';
+  `;
+  const total = Number(countRows[0]?.total || 0);
+  if (total === 0) {
+    await tg("sendMessage", { chat_id: chatId, text: "شما هنوز کانفیگی خریداری نکرده‌اید." });
+    return null;
+  }
+  const totalPages = Math.ceil(total / CONFIGS_PER_PAGE);
+  const safePage = Math.max(0, Math.min(page, totalPages - 1));
+  const offset = safePage * CONFIGS_PER_PAGE;
   const rows = await sql`
     SELECT i.id, i.config_value, i.delivery_payload, i.panel_id, p.panel_config, p.name, p.size_mb, o.purchase_id
     FROM inventory i
@@ -10490,12 +10505,8 @@ async function showMyConfigs(chatId: number, userId: number, forTopupFlow: boole
     LEFT JOIN orders o ON o.id = i.sold_order_id
     WHERE i.owner_telegram_id = ${userId} AND i.status = 'sold'
     ORDER BY i.id DESC
-    LIMIT 30;
+    LIMIT ${CONFIGS_PER_PAGE} OFFSET ${offset};
   `;
-  if (!rows.length) {
-    await tg("sendMessage", { chat_id: chatId, text: "شما هنوز کانفیگی خریداری نکرده‌اید." });
-    return null;
-  }
   const panelIds = [...new Set(rows.map((r) => Number(r.panel_id || 0)).filter((n) => n > 0))];
   const panelById = new Map<number, Record<string, unknown>>();
   for (const pid of panelIds) {
@@ -10517,16 +10528,27 @@ async function showMyConfigs(chatId: number, userId: number, forTopupFlow: boole
       callback_data: `open_config_${row.id}${forTopupFlow ? "_t" : ""}`
     }
   ]);
+  // Pagination navigation row
+  if (totalPages > 1) {
+    const navRow: { text: string; callback_data: string }[] = [];
+    const prevCb = forTopupFlow ? `topup_page_${safePage - 1}` : `my_configs_page_${safePage - 1}`;
+    const nextCb = forTopupFlow ? `topup_page_${safePage + 1}` : `my_configs_page_${safePage + 1}`;
+    if (safePage > 0) navRow.push({ text: "◀️ قبلی", callback_data: prevCb });
+    navRow.push({ text: `صفحه ${safePage + 1} از ${totalPages}`, callback_data: "noop" });
+    if (safePage < totalPages - 1) navRow.push({ text: "بعدی ▶️", callback_data: nextCb });
+    keyboard.push(navRow);
+  }
   if (!forTopupFlow) {
     keyboard.push([cb("🧾 سفارش‌های من", "my_orders", "primary"), cb("🔎 پیگیری سفارش", "order_lookup", "primary")]);
     keyboard.push([cb("➕ افزایش دیتا", "topup_menu", "primary"), cb("📜 درخواست‌های انتقال", "my_migrations", "primary")]);
   }
   keyboard.push([homeButton()]);
+  const pageLabel = totalPages > 1 ? ` (صفحه ${safePage + 1} از ${totalPages})` : "";
   await tg("sendMessage", {
     chat_id: chatId,
     text: forTopupFlow
-      ? "کانفیگ موردنظر برای افزایش دیتا را انتخاب کنید:"
-      : "کانفیگ‌های خریداری‌شده شما 👇\nبرای دیدن جزئیات و QR روی هر کانفیگ بزنید:",
+      ? `کانفیگ موردنظر برای افزایش دیتا را انتخاب کنید${pageLabel}:`
+      : `کانفیگ‌های خریداری‌شده شما 👇${pageLabel}\nبرای دیدن جزئیات و QR روی هر کانفیگ بزنید:`,
     reply_markup: { inline_keyboard: keyboard }
   });
 }
@@ -12072,7 +12094,12 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     return null;
   }
   if (data === "my_configs") {
-    await showMyConfigs(chatId, userId, false);
+    await showMyConfigs(chatId, userId, false, 0);
+    return null;
+  }
+  if (data.startsWith("my_configs_page_")) {
+    const page = parseInt(data.replace("my_configs_page_", ""), 10);
+    await showMyConfigs(chatId, userId, false, Number.isFinite(page) ? page : 0);
     return null;
   }
   if (data === "my_orders") {
@@ -12152,7 +12179,12 @@ async function handleCallback(update: TgUpdate["callback_query"]) {
     return null;
   }
   if (data === "topup_menu") {
-    await showMyConfigs(chatId, userId, true);
+    await showMyConfigs(chatId, userId, true, 0);
+    return null;
+  }
+  if (data.startsWith("topup_page_")) {
+    const page = parseInt(data.replace("topup_page_", ""), 10);
+    await showMyConfigs(chatId, userId, true, Number.isFinite(page) ? page : 0);
     return null;
   }
   if (data.startsWith("open_config_")) {
