@@ -10506,28 +10506,13 @@ async function showMyConfigs(chatId: number, userId: number, forTopupFlow: boole
     {
       text: (() => {
         const payload = parseDeliveryPayload(row.delivery_payload);
-        const label = payload.metadata?.label ? String(payload.metadata.label) : "";
         const revoked = payload.metadata?.revoked === true;
-        const title = label ? `${label} (${row.name})` : String(row.name);
-        const isPanel = Boolean(payload.metadata?.panelType) && String(payload.metadata?.panelType || "") !== "manual";
-        const pt = String(payload.metadata?.panelType || "");
-        const pid = Number(row.panel_id || 0);
-        const productCfg =
-          (typeof row.panel_config === "string" ? parseJsonObject(row.panel_config) : (row.panel_config as Record<string, unknown>)) ||
-          {};
-        let hostHint: string | null = null;
-        let summaryPayload = payload;
-        if (isPanel && pt === "sanaei" && pid > 0) {
-          const pRow = panelById.get(pid);
-          if (pRow) {
-            const { payload: live, outboundHost } = applyLiveSanaeiPanelOverridesToDeliveryPayload(payload, pRow, productCfg);
-            summaryPayload = live;
-            hostHint = outboundHost;
-          }
-        }
+        // Use the actual config identifier (email for sanaei, username for marzban), falling back to product name
+        const configName =
+          String(payload.metadata?.label || payload.metadata?.email || payload.metadata?.username || row.name || "").trim();
         const sizeMb = Number(row.size_mb || 0);
         const sizeLabel = sizeMb >= 1024 ? `${(sizeMb / 1024).toFixed(0)}GB` : sizeMb > 0 ? `${sizeMb}MB` : "";
-        return `🔹 ${title}${revoked ? " 🚫" : ""}${sizeLabel ? ` | ${sizeLabel}` : ""}`;
+        return `🔹 ${configName}${revoked ? " 🚫" : ""}${sizeLabel ? ` | ${sizeLabel}` : ""}`;
       })(),
       callback_data: `open_config_${row.id}${forTopupFlow ? "_t" : ""}`
     }
